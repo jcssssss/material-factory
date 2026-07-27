@@ -3,5 +3,13 @@
   "identifier": "default",
   "description": "主窗口默认能力集合，启用核心权限与原生文件对话框权限。",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-confirm",
+    "dialog:allow-message",
+    "dialog:allow-ask",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
 }

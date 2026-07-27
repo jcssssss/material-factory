@@ -7,12 +7,12 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Dependencies
-node_modules
+frontend/node_modules
 .pnp
 .pnp.js
 
 # Build output
-dist
+frontend/dist
 dist-ssr
 *.local
 
@@ -30,6 +30,9 @@ dist-ssr
 # Tauri
 src-tauri/target
 src-tauri/gen
+
+# Playwright
+test-results/
 
 # Build artifacts (TypeScript composite project output)
 *.tsbuildinfo

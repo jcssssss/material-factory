@@ -19,6 +19,7 @@ export default function TemplateCard({
   onClick,
 }: Props) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
+  const [imgError, setImgError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,11 +48,12 @@ export default function TemplateCard({
       onClick={() => onClick(template.id)}
     >
       <div className="aspect-[4/3] overflow-hidden bg-slate-100">
-        {thumbUrl ? (
+        {thumbUrl && !imgError ? (
           <img
             src={thumbUrl}
             alt={template.file_name}
             className="h-full w-full object-cover"
+            onError={() => setImgError(true)}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-workspace-muted">

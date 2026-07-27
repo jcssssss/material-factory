@@ -33,7 +33,7 @@ export default defineConfig({
       : undefined,
     watch: {
       // 忽略 Rust 侧变更，避免无意义的重启。
-      ignored: ["**/src-tauri/**", "**/dist/**", "**/node_modules/**"],
+      ignored: ["../src-tauri/**", "**/dist/**", "**/node_modules/**"],
     },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],

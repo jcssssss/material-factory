@@ -2,7 +2,7 @@
 //
 // 仅保留目录树节点类型，供工作台流程内资料列表图片生成模块使用
 // （taskRunner.ts 的 generateMaterialListImages）。
-// 与 src-tauri/src/lib.rs 的 `FolderTreeNode` / `FileType` Rust 结构对齐，
+// 与 backend/src/lib.rs 的 `FolderTreeNode` / `FileType` Rust 结构对齐，
 // Rust 侧通过 serde 序列化为小写字符串，前端以字面量联合类型约束。
 
 // 文件类型分类，与 Rust FileType 枚举（serde rename_all = "lowercase"）对齐。

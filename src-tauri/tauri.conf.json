@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.xhspic.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm --prefix ./frontend run dev",
+    "beforeBuildCommand": "npm --prefix ./frontend run build",
     "devUrl": "http://localhost:5173",
-    "frontendDist": "../dist"
+    "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
@@ -27,7 +27,15 @@
       "csp": null,
       "assetProtocol": {
         "scope": ["$APPDATA/backgrounds/files/**"]
-      }
+      },
+      "capabilities": [
+        {
+          "identifier": "default",
+          "description": "主窗口默认能力集合",
+          "windows": ["main"],
+          "permissions": ["core:default", "dialog:default"]
+        }
+      ]
     }
   },
   "bundle": {

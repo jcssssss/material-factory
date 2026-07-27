@@ -16,17 +16,24 @@ export default function CalibratePage() {
   const [corners, setCorners] = useState<CalibrationCorners | null>(null);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id) {
+      setError("缺少模板 ID，请从背景模板页重新进入");
+      setLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
     async function load() {
       try {
         const t = await getTemplate(id!);
         if (cancelled) return;
+
         setTemplate(t);
 
         const path = await getBackgroundFilePath(t.file_name);
         if (cancelled) return;
+
         setImageUrl(convertFileSrc(path));
 
         if (t.calibrated && t.a4_x1 !== null) {
@@ -38,7 +45,9 @@ export default function CalibratePage() {
           ] as CalibrationCorners);
         }
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -75,7 +84,7 @@ export default function CalibratePage() {
     );
   }
 
-  if (error && !template) {
+  if (error) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-6">
         <p className="text-sm text-workspace-danger">{error}</p>

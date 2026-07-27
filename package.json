@@ -1,45 +1,12 @@
 {
-  "name": "xhs-pic",
+  "name": "xhs-pic-workspace",
   "private": true,
-  "version": "0.1.0",
-  "type": "module",
-  "description": "小红书素材工厂 - 完全本地执行的桌面 PDF 批量转图片工具",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2.1.1",
-    "@tauri-apps/plugin-dialog": "^2.7.2",
-    "pdfjs-dist": "^3.11.174",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
-    "zustand": "^5.0.14"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.1.0",
-    "@testing-library/jest-dom": "^7.0.0",
-    "@testing-library/react": "^16.3.2",
-    "@testing-library/user-event": "^14.6.1",
-    "@types/node": "^22.7.4",
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.0",
-    "@vitejs/plugin-react": "^4.3.2",
-    "autoprefixer": "^10.4.20",
-    "jsdom": "^29.1.1",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.13",
-    "tsx": "^4.23.1",
-    "typescript": "^5.6.2",
-    "vite": "^5.4.8",
-    "vitest": "^2.1.9"
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "tauri:dev": "./frontend/node_modules/.bin/tauri dev",
+    "tauri:build": "./frontend/node_modules/.bin/tauri build",
+    "test": "cd frontend && npm run test",
+    "test:e2e": "cd frontend && npm run test:e2e"
   }
 }
