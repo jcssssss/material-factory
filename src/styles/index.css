@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-workspace-bg font-sans antialiased text-workspace-fg;
+    margin: 0;
+  }
+
+  ::selection {
+    @apply bg-workspace-accent/15;
+  }
+
+  *:focus-visible {
+    @apply outline-2 outline-offset-2 outline-workspace-accent/50;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-workspace-muted/30;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-workspace-muted/50;
+  }
+}

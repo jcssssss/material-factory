@@ -1,0 +1,49 @@
+- [ ] Rust 命令 `scan_folder_tree` 已实现并注册到 `invoke_handler!`，返回递归目录树结构
+- [ ] `scan_folder_tree` 自动过滤 `.DS_Store`、`Thumbs.db`、`desktop.ini`、`__MACOSX` 等系统文件
+- [ ] `scan_folder_tree` 对无法读取元数据的文件跳过并记 warn 日志，不中断扫描
+- [ ] `scan_folder_tree` 节点结构包含 `name`、`path`、`is_dir`、`extension`、`file_type`、`empty`、`children`
+- [ ] 前端 `src/types/materialList.ts` 定义了 `FolderTreeNode`、`MaterialListTaskConfig`、`MaterialListTaskRunResult`、`MaterialListHistoryTask` 等类型
+- [ ] `src/lib/materialList/folderScanner.ts` 封装了类型化的 `scanFolderTree` 调用
+- [ ] `src/lib/materialList/iconAssets.ts` 提供 PDF/Word/Excel/PPT/文件夹/通用文件 6 类 SVG 图标
+- [ ] `getIconForFileType` 对 `.pdf`/`.docx`/`.doc`/`.xlsx`/`.xls`/`.pptx`/`.ppt` 与未识别后缀的映射正确
+- [ ] `svgStringToImage` 能将 SVG 字符串转为可在 Canvas 绘制的 `HTMLImageElement`
+- [ ] `sortDirectoryChildren` 实现文件夹优先、同类按名称升序（不区分大小写）
+- [ ] `paginateChildren` 默认每页 ≤ 25 项，超项自动拆分
+- [ ] `formatImageFilename` 在编号 < 99 时返回两位零填充（如 `资料列表_01.jpg`），≥ 99 时升级为三位（如 `资料列表_100.jpg`）
+- [ ] `renderLayoutPageToCanvas` 输出 1242×1656 px 白底 Canvas，垂直排列图标+文件名
+- [ ] 渲染图片不含商品名称、文件总数、营销文案、水印、Logo
+- [ ] 文件名过长时按可用宽度截断并添加省略号
+- [ ] `canvasToJpegBlob` 导出 JPG 质量 100%
+- [ ] `runMaterialListTask` 对每个商品文件夹执行扫描→深度优先遍历→分页渲染→写入磁盘完整流程
+- [ ] 单个商品范围内图片编号从 `01` 起全局递增
+- [ ] 单目录渲染失败时记 error 日志并跳过，不影响后续目录或商品
+- [ ] 空文件夹（`empty: true`）不生成图片，仅记 warn 日志
+- [ ] 所有日志通过 `append_log_line` 写入 JSONL，scope 包含 `material-list`
+- [ ] `useMaterialListStore` 提供 `addTask`、`startQueue`、`updateTaskStatus`、`clearCompleted` actions
+- [ ] 资料列表任务历史持久化到 localStorage 键 `xhs-pic:material-list-history`，最多 200 条
+- [ ] 资料列表历史与 PDF 任务历史 `xhs-pic:history` 隔离，互不污染
+- [ ] `MaterialListPage` 三段式布局：任务表单 + 队列表格 + 进度面板
+- [ ] 任务表单提供任务名输入、商品文件夹多选、加入队列按钮
+- [ ] 队列表格展示任务名、商品数、状态、操作
+- [ ] 进度面板展示当前任务、当前商品、已生成图片数、总进度
+- [ ] `/material-list` 路由已注册到 `src/routes/index.tsx`
+- [ ] 导航栏新增「资料列表」Tab，与「工作台」「历史记录」「日志」并列
+- [ ] v1.0/v1.1 的 PDF 任务流水线、状态机、断点恢复逻辑未受影响
+- [x] `产品需求文档-小红书素材工厂.md` 新增「资料列表展示图生成器」功能模块章节，覆盖背景、价值、输入、规则、图片规范、输出、异常、MVP 限制
+- [x] `产品需求文档-小红书素材工厂.md` 在产品概述章节同步「新增资料列表生成器」
+- [x] `产品需求文档-小红书素材工厂.md` 在非目标章节同步「不包含模板编辑器与网盘真实截图」
+- [x] `产品需求文档-小红书素材工厂.md` 未改写 v1.0/v1.1 已有章节内容
+- [x] `技术架构文档-小红书素材工厂.md` 版本号升级到 v1.2.0
+- [x] `技术架构文档-小红书素材工厂.md` 总体架构图新增「资料列表生成器」分支
+- [x] `技术架构文档-小红书素材工厂.md` 模块划分新增 `materialList/` 子模块与 `useMaterialListStore.ts`
+- [x] `技术架构文档-小红书素材工厂.md` Tauri 命令清单新增 `scan_folder_tree`
+- [x] `技术架构文档-小红书素材工厂.md` 新增「资料列表渲染流水线」时序图（扫描→排序分页→渲染→写盘→编号）
+- [x] `技术架构文档-小红书素材工厂.md` 持久化说明新增 `xhs-pic:material-list-history` 键
+- [x] `技术架构文档-小红书素材工厂.md` 未改写 v1.0/v1.1 已有架构描述
+- [x] `实施计划-桌面批量PDF转小红书素材.md` 追加「V1.2.0 阶段：资料列表展示图生成器」条目与依赖说明
+- [x] `实施计划-桌面批量PDF转小红书素材.md` 未改写 v1.0/v1.1 已有阶段内容
+- [x] 单元测试覆盖排序、分页、文件名格式化、图标映射、Runner 异常隔离
+- [x] 既有 100 个单元测试全部通过，新增测试全部通过
+- [x] `npx tsc --noEmit` 退出码 0
+- [x] `cargo check` 编译成功
+- [x] `npm run build` 构建成功

@@ -1,0 +1,6 @@
+# Rust
+/target
+/gen/schemas
+
+# Cargo lock
+Cargo.lock
