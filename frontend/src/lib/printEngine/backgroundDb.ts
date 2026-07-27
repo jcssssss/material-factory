@@ -42,21 +42,35 @@ export async function saveCalibration(
   return invoke<void>("save_calibration", { id, corners });
 }
 
+/** 上传并处理为 1242×1656 JPEG。返回最终文件名和尺寸。 */
 export async function saveBackgroundFile(
-  bytes: number[],
+  bytes: Uint8Array,
   ext: string,
-): Promise<string> {
-  return invoke<string>("save_background_file", { bytes, ext });
+): Promise<{ file_name: string; width: number; height: number }> {
+  return invoke<{ file_name: string; width: number; height: number }>("save_background_file", { bytes, ext });
 }
 
 export function getBackgroundFilePath(file_name: string): Promise<string> {
   return invoke<string>("get_background_file_path", { fileName: file_name });
 }
 
+/** 读取背景原图，走二进制通道返回 ArrayBuffer（零拷贝），用于标定页。 */
 export async function readBackgroundFile(
   file_name: string,
-): Promise<number[]> {
-  return invoke<number[]>("read_background_file", { fileName: file_name });
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_background_file", { fileName: file_name });
+}
+
+/** 读取背景文件的缩略图（最长边 600px JPEG），走二进制通道，专用于列表快速预览。 */
+export async function readBackgroundThumbnail(
+  file_name: string,
+): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_background_thumbnail", { fileName: file_name });
+}
+
+/** 批量补齐所有缺失的缩略图（页面首次进入时调用一次）。返回实际生成数。 */
+export async function ensureBackgroundThumbnails(): Promise<number> {
+  return invoke<number>("ensure_background_thumbnails");
 }
 
 export async function deleteBackgroundFile(file_name: string): Promise<void> {

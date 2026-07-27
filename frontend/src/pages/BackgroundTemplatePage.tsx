@@ -6,6 +6,7 @@ import {
   listTemplates,
   deleteTemplate,
   batchDeleteTemplates,
+  ensureBackgroundThumbnails,
 } from "../lib/printEngine/backgroundDb";
 import TemplateGrid from "../components/background/TemplateGrid";
 import UploadDialog from "../components/background/UploadDialog";
@@ -25,6 +26,10 @@ export default function BackgroundTemplatePage() {
     try {
       const list = await listTemplates();
       setTemplates(list);
+      // 首次进入时批量补齐旧模板的缩略图（后续进入瞬时完成）
+      if (list.length > 0) {
+        await ensureBackgroundThumbnails();
+      }
     } catch {
       setTemplates([]);
     } finally {

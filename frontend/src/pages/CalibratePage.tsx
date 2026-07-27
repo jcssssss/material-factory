@@ -1,19 +1,23 @@
-import { useEffect, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { useParams, useNavigate } from "react-router-dom";
+import { useEffect, useState, useMemo, useRef } from "react";
+import { useLocation, useNavigate, matchPath } from "react-router-dom";
 import type { BackgroundTemplate, CalibrationCorners } from "../types/background";
-import { getTemplate, saveCalibration, getBackgroundFilePath } from "../lib/printEngine/backgroundDb";
+import { getTemplate, saveCalibration, readBackgroundFile } from "../lib/printEngine/backgroundDb";
 import CornerCalibrator from "../components/background/CornerCalibrator";
 
 export default function CalibratePage() {
-  const { id } = useParams<{ id: string }>();
+  const location = useLocation();
   const navigate = useNavigate();
+  const id = useMemo(() => {
+    const match = matchPath("/calibrate/:id", location.pathname);
+    return match?.params?.id;
+  }, [location.pathname]);
   const [template, setTemplate] = useState<BackgroundTemplate | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [corners, setCorners] = useState<CalibrationCorners | null>(null);
+  const imageUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!id) {
@@ -31,10 +35,15 @@ export default function CalibratePage() {
 
         setTemplate(t);
 
-        const path = await getBackgroundFilePath(t.file_name);
+        const buffer = await readBackgroundFile(t.file_name);
         if (cancelled) return;
 
-        setImageUrl(convertFileSrc(path));
+        const ext = t.file_name.split(".").pop()?.toLowerCase();
+        const mime = ext === "png" ? "image/png" : "image/jpeg";
+        const blob = new Blob([buffer], { type: mime });
+        const url = URL.createObjectURL(blob);
+        imageUrlRef.current = url;
+        setImageUrl(url);
 
         if (t.calibrated && t.a4_x1 !== null) {
           setCorners([
@@ -56,6 +65,10 @@ export default function CalibratePage() {
     void load();
     return () => {
       cancelled = true;
+      if (imageUrlRef.current) {
+        URL.revokeObjectURL(imageUrlRef.current);
+        imageUrlRef.current = null;
+      }
     };
   }, [id]);
 

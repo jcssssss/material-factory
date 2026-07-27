@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { useEffect, useState, useRef } from "react";
 import type { BackgroundTemplate } from "../../types/background";
-import { getBackgroundFilePath } from "../../lib/printEngine/backgroundDb";
+import { readBackgroundThumbnail } from "../../lib/printEngine/backgroundDb";
 
 type Props = {
   template: BackgroundTemplate;
@@ -20,15 +19,32 @@ export default function TemplateCard({
 }: Props) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
+  const thumbUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void getBackgroundFilePath(template.file_name).then((path) => {
-      if (cancelled) return;
-      setThumbUrl(convertFileSrc(path));
-    });
+    void (async () => {
+      try {
+        const buffer = await readBackgroundThumbnail(template.file_name);
+        if (cancelled) return;
+        const blob = new Blob([buffer], { type: "image/jpeg" });
+        const url = URL.createObjectURL(blob);
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        thumbUrlRef.current = url;
+        setThumbUrl(url);
+      } catch {
+        if (!cancelled) setImgError(true);
+      }
+    })();
     return () => {
       cancelled = true;
+      if (thumbUrlRef.current) {
+        URL.revokeObjectURL(thumbUrlRef.current);
+        thumbUrlRef.current = null;
+      }
     };
   }, [template.file_name]);
 
@@ -47,12 +63,12 @@ export default function TemplateCard({
       }
       onClick={() => onClick(template.id)}
     >
-      <div className="aspect-[4/3] overflow-hidden bg-slate-100">
+      <div className="aspect-[4/3] overflow-hidden bg-slate-100 p-2">
         {thumbUrl && !imgError ? (
           <img
             src={thumbUrl}
             alt={template.file_name}
-            className="h-full w-full object-cover"
+            className="h-full w-full object-contain"
             onError={() => setImgError(true)}
           />
         ) : (

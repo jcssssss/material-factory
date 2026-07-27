@@ -104,15 +104,15 @@ export async function generatePrintImages(
       bg.a4_x4!, bg.a4_y4!,
     ];
 
-    const materialNumberArray = await invoke<number[]>("read_pdf_bytes", { path: file.path });
-    const bgNumberArray = await readBackgroundFile(bg.file_name);
+    const materialBuffer = await invoke<ArrayBuffer>("read_pdf_bytes", { path: file.path });
+    const bgBuffer = await readBackgroundFile(bg.file_name);
 
     const outputBytes = await composePrintImage({
-      bgBytes: new Uint8Array(bgNumberArray),
+      bgBytes: new Uint8Array(bgBuffer),
       bgW: bg.width,
       bgH: bg.height,
       corners,
-      materialBytes: new Uint8Array(materialNumberArray),
+      materialBytes: new Uint8Array(materialBuffer),
     });
 
     const outPath = joinPath(printDir, `${String(i + 1).padStart(3, "0")}.jpg`);

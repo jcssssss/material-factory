@@ -64,6 +64,8 @@ pub fn run() {
             scan_folder_tree,
             background::save_background_file,
             background::read_background_file,
+            background::read_background_thumbnail,
+            background::ensure_background_thumbnails,
             background::delete_background_file,
             background::list_background_files,
             background::list_background_templates,
