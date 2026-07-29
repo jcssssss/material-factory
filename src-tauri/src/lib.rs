@@ -20,6 +20,7 @@
 mod background;
 mod db;
 mod warp;
+mod watermark;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -29,7 +30,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tauri::{command, Manager};
-use tauri::ipc::Response;
+use tauri::ipc::{InvokeBody, Request, Response};
 
 use db::Database;
 
@@ -56,6 +57,7 @@ pub fn run() {
             read_pdf_bytes,
             ensure_output_dir,
             write_image_file,
+            write_image_binary,
             append_log_line,
             read_log_file,
             clear_log_file,
@@ -77,9 +79,25 @@ pub fn run() {
             background::random_background_template,
             background::save_calibration,
             warp::warp_to_a4,
+            watermark::detect_watermark_info,
+            watermark::remove_watermarks,
+            watermark::batch_remove_watermarks,
+            copy_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// 将源文件复制到目标路径。目标路径父目录必须已存在。
+// 用于去水印模块无水印文件原样输出。
+#[command]
+fn copy_file(src: String, dst: String) -> Result<(), String> {
+    let src_path = std::path::Path::new(&src);
+    if !src_path.exists() {
+        return Err(format!("源文件不存在：{}", src));
+    }
+    fs::copy(&src, &dst).map_err(|e| format!("复制文件失败：{e}"))?;
+    Ok(())
 }
 
 // 扫描文件夹（仅顶层）中的 PDF 与 Word 输入文件（.pdf/.docx/.doc），
@@ -206,6 +224,59 @@ fn write_image_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
             format!(
                 "写入图片失败：{raw}\n\n这通常是 Windows 权限不足导致。请换用当前用户可写的目录，或以管理员身份运行本应用。"
             )
+        } else {
+            format!("写入图片失败：{raw}")
+        }
+    })
+}
+
+// 将 JPG 字节写入指定路径（二进制 body 版本）。
+//
+// 为什么单独一个命令：Tauri v2 的 invoke 在 args 为普通对象 { path, bytes } 时，
+// 会把嵌套的 Uint8Array 在主线程同步 JSON.stringify 成数字数组（Array.from），
+// 一张数 MB JPG → ~15-25MB 字符串，主线程阻塞数百毫秒 ~ 1 秒，仿真打印滚动卡顿。
+//
+// 解法：前端只传一个顶层 Uint8Array（Tauri 走 octet-stream 零序列化二进制 body），
+// body 格式：[4 字节 LE u32 path_len][UTF-8 path_bytes][JPEG 像素数据]。
+// Rust 端用 Request 参数拿 InvokeBody::Raw，解开三段直接 fs::write。
+#[command]
+fn write_image_binary(request: Request) -> Result<(), String> {
+    let body: Vec<u8> = match request.body() {
+        InvokeBody::Raw(v) => v.clone(),
+        InvokeBody::Json(_) => {
+            return Err(
+                "write_image_binary 需要 octet-stream 二进制 body，请用 invoke 顶层传 Uint8Array"
+                    .to_string(),
+            );
+        }
+    };
+
+    if body.len() < 4 {
+        return Err("二进制 body 太短，缺少路径长度头".to_string());
+    }
+    let path_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    if body.len() < 4 + path_len {
+        return Err("二进制 body 太短，路径段不完整".to_string());
+    }
+    let path = String::from_utf8_lossy(&body[4..4 + path_len]).to_string();
+    let bytes = &body[4 + path_len..];
+
+    let p = Path::new(&path);
+    if let Some(parent) = p.parent() {
+        if !parent.exists() {
+            return Err(format!(
+                "输出目录不存在，请先 ensure_output_dir：{}",
+                parent.display()
+            ));
+        }
+    }
+
+    fs::write(p, bytes).map_err(|e| {
+        let raw = format!("{e}");
+        if raw.contains("Operation not permitted") || raw.contains("os error 1") {
+            format!("写入图片失败：{raw}\n\n这通常是 macOS 权限保护导致。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加本应用，或换用非受保护目录。")
+        } else if raw.contains("Access is denied") || raw.contains("os error 5") {
+            format!("写入图片失败：{raw}\n\n这通常是 Windows 权限不足导致。请换用当前用户可写的目录，或以管理员身份运行本应用。")
         } else {
             format!("写入图片失败：{raw}")
         }

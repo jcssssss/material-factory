@@ -20,6 +20,7 @@
 import type {
   PageResult,
   PdfWorkItem,
+  StageKind,
   TaskConfig,
   TaskRunResult,
   TaskStatus,
@@ -138,7 +139,8 @@ function collectNonEmptyDirectories(root: FolderTreeNode): FolderTreeNode[] {
 //   3. 逐目录渲染 Canvas → JPG → 写盘到 taskOutputDir
 async function generateMaterialListImages(
   task: TaskConfig,
-  taskOutputDir: string
+  taskOutputDir: string,
+  onProgress?: (done: number, total: number) => void,
 ): Promise<void> {
   logger.taskInfo(task.taskId, `开始生成资料列表展示图`);
 
@@ -181,6 +183,7 @@ async function generateMaterialListImages(
             bytes: Array.from(bytes),
           });
           currentIndex += 1;
+          onProgress?.(currentIndex, totalPages);
           logger.taskInfo(task.taskId, `资料列表图已生成 → ${outputPath}`);
           // 让渡主线程：避免连续 Canvas 渲染 + IPC 写盘阻塞 UI。
           // setTimeout(0) 让事件循环有机会处理 UI 交互和重绘。
@@ -354,10 +357,22 @@ export async function runTask(
     }
   }
 
+  // 预计算阶段管线：根据任务配置决定实际执行的阶段列表。
+  const plannedStages: StageKind[] = ["pdf_convert"];
+  if (task.generateMaterialList) plannedStages.push("material_list");
+  if (task.generatePrintImages) plannedStages.push("print_compose");
+
   if (!hasFatalError) {
-    // 逐个 PDF 处理。单 PDF 失败不中断同任务其他 PDF。
+    // ── 预扫描：收集所有待处理 PDF 的工作项，计算阶段总页数 ──
+    type PreparedPdf = {
+      resolved: (typeof resolvedPdfs)[number];
+      workItem: PdfWorkItem;
+      bpPdf: (typeof breakpointPdfs)[number] | undefined;
+    };
+    const preparedPdfs: PreparedPdf[] = [];
+    let stagePdfPages = 0;
+
     for (const resolved of resolvedPdfs) {
-      // 断点恢复：跳过已完成的 PDF
       const bpPdf = breakpointPdfs.find(
         (bp) => bp.originalPath === resolved.originalPath
       );
@@ -374,40 +389,61 @@ export async function runTask(
           return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
         }
       }
-      const actualPdfPath = resolved.pdfPath;
-      const displayPath = resolved.originalPath;
-      let workItem: PdfWorkItem;
 
-      // ---- 单 PDF 失败隔离 ----
       try {
-        workItem = await processor.prepareWorkItem(task, actualPdfPath);
+        const workItem = await processor.prepareWorkItem(task, resolved.pdfPath);
+        if (workItem.selectedPages.length === 0) {
+          logger.taskWarn(task.taskId, `PDF 无合法页码，跳过：${workItem.pdfName}`);
+          pageResults.push({
+            taskId: task.taskId,
+            pdfPath: resolved.originalPath,
+            pageNumber: 0,
+            status: "skipped",
+            errorMessage: "无合法页码",
+          });
+          continue;
+        }
+        stagePdfPages += workItem.selectedPages.length;
+        preparedPdfs.push({ resolved, workItem, bpPdf });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.taskError(task.taskId, `PDF 准备失败：${basename(displayPath)} - ${msg}`);
+        logger.taskError(task.taskId, `PDF 准备失败：${basename(resolved.originalPath)} - ${msg}`);
         pageResults.push({
           taskId: task.taskId,
-          pdfPath: displayPath,
+          pdfPath: resolved.originalPath,
           pageNumber: 0,
           status: "failed",
           errorMessage: `PDF 准备失败：${msg}`,
         });
-        continue; // 继续下一个 PDF
       }
+    }
 
-      // PDF 无合法页码：跳过并记录。
-      if (workItem.selectedPages.length === 0) {
-        logger.taskWarn(
-          task.taskId,
-          `PDF 无合法页码，跳过：${workItem.pdfName}`
-        );
-        pageResults.push({
-          taskId: task.taskId,
-          pdfPath: displayPath,
-          pageNumber: 0,
-          status: "skipped",
-          errorMessage: "无合法页码",
-        });
-        continue;
+    // 设置阶段初始进度。
+    const initSuccess = pageResults.filter((r) => r.status === "success").length;
+    const initFailed = pageResults.filter((r) => r.status === "failed").length;
+    useTaskStore.getState().setProgress({
+      taskId: task.taskId,
+      plannedStages,
+      currentStage: stagePdfPages > 0
+        ? { stage: "pdf_convert", done: 0, total: stagePdfPages, detail: "准备开始…" }
+        : null,
+      completedStages: [],
+      successPages: initSuccess,
+      failedPages: initFailed,
+    });
+
+    // ── 逐 PDF 处理 ──
+    let cumulativePages = 0;
+    for (const { resolved, workItem, bpPdf } of preparedPdfs) {
+      const displayPath = resolved.originalPath;
+
+      // PDF 边界：检查暂停/取消信号。
+      if (controller) {
+        const shouldContinue = await controller.checkAndAwait();
+        if (!shouldContinue) {
+          logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+          return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
+        }
       }
 
       logger.taskInfo(
@@ -417,24 +453,9 @@ export async function runTask(
 
       const pdfOutputDir = joinPath(taskOutputDir, workItem.pdfName);
 
-      // 更新执行进度（当前 PDF）。
-      useTaskStore.getState().setProgress({
-        taskId: task.taskId,
-        currentPdfName: workItem.pdfName,
-        currentPage: workItem.selectedPages[0],
-        totalPages: workItem.selectedPages.length,
-        successPages: pageResults.filter(
-          (r) => r.status === "success"
-        ).length,
-        failedPages: pageResults.filter((r) => r.status === "failed").length,
-      });
-
       // 逐页处理。单页失败不中断同 PDF 下一页。
       for (const pageNumber of workItem.selectedPages) {
         // 页边界：检查暂停/取消信号。
-        // 暂停时阻塞直到 resume；取消时退出循环。
-        // 当前页已经完成（上一轮的 renderAndExportPage 已返回），
-        // 这里检查的是"是否应该开始下一页"。
         if (controller) {
           const shouldContinue = await controller.checkAndAwait();
           if (!shouldContinue) {
@@ -443,17 +464,19 @@ export async function runTask(
           }
         }
         // 更新执行进度（当前页）。
-        const currentSuccess = pageResults.filter(
-          (r) => r.status === "success"
-        ).length;
-        const currentFailed = pageResults.filter(
-          (r) => r.status === "failed"
-        ).length;
+        cumulativePages += 1;
+        const currentSuccess = pageResults.filter((r) => r.status === "success").length;
+        const currentFailed = pageResults.filter((r) => r.status === "failed").length;
         useTaskStore.getState().setProgress({
           taskId: task.taskId,
-          currentPdfName: workItem.pdfName,
-          currentPage: pageNumber,
-          totalPages: workItem.selectedPages.length,
+          plannedStages,
+          currentStage: {
+            stage: "pdf_convert",
+            done: cumulativePages,
+            total: stagePdfPages,
+            detail: `${workItem.pdfName} 第 ${pageNumber}/${workItem.selectedPages.length} 页`,
+          },
+          completedStages: [],
           successPages: currentSuccess,
           failedPages: currentFailed,
         });
@@ -531,16 +554,61 @@ export async function runTask(
     }
   }
 
+  // PDF 转换阶段完成，标记为已完成。
+  const pdfSuccess = pageResults.filter((r) => r.status === "success").length;
+  const pdfFailed = pageResults.filter((r) => r.status === "failed").length;
+  useTaskStore.getState().setProgress({
+    taskId: task.taskId,
+    plannedStages,
+    currentStage: null,
+    completedStages: ["pdf_convert"],
+    successPages: pdfSuccess,
+    failedPages: pdfFailed,
+  });
+
   // 资料列表展示图生成：PDF 处理完成后，若任务勾选了 generateMaterialList，
   // 对 sourcePaths 中的文件夹生成资料列表图，输出到 taskOutputDir。
   // 失败不中断任务（记 warn 日志），不影响任务最终状态。
   if (task.generateMaterialList && !hasFatalError) {
+    // 进入资料列表阶段。
+    useTaskStore.getState().setProgress({
+      taskId: task.taskId,
+      plannedStages,
+      currentStage: { stage: "material_list", done: 0, total: 0, detail: "扫描文件夹…" },
+      completedStages: ["pdf_convert"],
+      successPages: pdfSuccess,
+      failedPages: pdfFailed,
+    });
+
     try {
-      await generateMaterialListImages(task, taskOutputDir);
+      await generateMaterialListImages(task, taskOutputDir, (done, total) => {
+        useTaskStore.getState().setProgress({
+          taskId: task.taskId,
+          plannedStages,
+          currentStage: { stage: "material_list", done, total, detail: `生成中 ${done}/${total}` },
+          completedStages: ["pdf_convert"],
+          successPages: pdfSuccess,
+          failedPages: pdfFailed,
+        });
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.taskWarn(task.taskId, `资料列表生成异常：${msg}`);
     }
+  }
+
+  // 资料列表阶段完成。
+  if (task.generateMaterialList && !hasFatalError) {
+    useTaskStore.getState().setProgress({
+      taskId: task.taskId,
+      plannedStages,
+      currentStage: null,
+      completedStages: plannedStages.includes("material_list")
+        ? ["pdf_convert", "material_list"]
+        : ["pdf_convert"],
+      successPages: pdfSuccess,
+      failedPages: pdfFailed,
+    });
   }
 
   // 仿打印图片合成：PDF 处理完成后，若任务勾选了 generatePrintImages，
@@ -557,20 +625,27 @@ export async function runTask(
           task.taskId,
           `开始仿打印合成（${calibrated.length} 个背景模板）`,
         );
+        const curCompleted = useTaskStore.getState().progress?.completedStages ?? [];
+        useTaskStore.getState().setProgress({
+          taskId: task.taskId,
+          plannedStages,
+          currentStage: { stage: "print_compose", done: 0, total: 0, detail: "准备合成…" },
+          completedStages: curCompleted,
+          successPages: pdfSuccess,
+          failedPages: pdfFailed,
+        });
         const count = await generatePrintImages(
           taskOutputDir,
           calibrated,
           (done, total) => {
-            const prev = useTaskStore.getState().progress;
+            const prevCompleted = useTaskStore.getState().progress?.completedStages ?? [];
             useTaskStore.getState().setProgress({
               taskId: task.taskId,
-              successPages: prev?.successPages ?? 0,
-              failedPages: prev?.failedPages ?? 0,
-              currentPdfName: prev?.currentPdfName,
-              currentPage: prev?.currentPage,
-              totalPages: prev?.totalPages,
-              printDone: done,
-              printTotal: total,
+              plannedStages,
+              currentStage: { stage: "print_compose", done, total, detail: `合成中 ${done}/${total}` },
+              completedStages: prevCompleted,
+              successPages: pdfSuccess,
+              failedPages: pdfFailed,
             });
           },
         );
@@ -586,6 +661,17 @@ export async function runTask(
   const status = resolveTaskStatus(pageResults, hasFatalError);
   const successCount = pageResults.filter((r) => r.status === "success").length;
   const failedCount = pageResults.filter((r) => r.status === "failed").length;
+
+  // 设置终态进度：所有阶段已完成，供 UI 展示完成过渡，避免任务间留白。
+  // 下一个任务的 setProgress 会自然覆盖此状态。
+  useTaskStore.getState().setProgress({
+    taskId: task.taskId,
+    plannedStages,
+    currentStage: null,
+    completedStages: [...plannedStages],
+    successPages: successCount,
+    failedPages: failedCount,
+  });
 
   const summary: TaskSummary = {
     taskId: task.taskId,
@@ -682,8 +768,8 @@ export async function runQueue(
       useTaskStore.getState().removeBreakpoint(nextTask.taskId);
     }
 
-    // 清除当前任务进度。
-    useTaskStore.getState().setProgress(null);
+    // 清除当前任务运行时状态。progress 保留终态供 UI 展示过渡，
+    // 下一个任务的 setProgress 会自然覆盖。
     useTaskStore.getState().setCurrentTaskId(null);
     useTaskStore.getState().setController(null);
 

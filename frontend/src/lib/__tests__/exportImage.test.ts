@@ -18,6 +18,7 @@ import {
   composeToPortraitCanvas,
   embedJfif300Dpi,
   buildPageImageFileName,
+  isPreviewImage,
 } from "../exportImage";
 
 describe("输出规格常量", () => {
@@ -99,6 +100,40 @@ describe("buildPageImageFileName", () => {
   it("不同 PDF / 不同页码 → 不同文件名", () => {
     expect(buildPageImageFileName("a", 1)).not.toBe(buildPageImageFileName("b", 1));
     expect(buildPageImageFileName("a", 1)).not.toBe(buildPageImageFileName("a", 2));
+  });
+});
+
+describe("isPreviewImage", () => {
+  it("匹配 buildPageImageFileName 生成的命名", () => {
+    expect(isPreviewImage("report_p001.jpg")).toBe(true);
+    expect(isPreviewImage("report_p010.jpg")).toBe(true);
+    expect(isPreviewImage("report_p999.jpg")).toBe(true);
+  });
+
+  it("匹配含中文字符的预览图名", () => {
+    expect(isPreviewImage("咨询报告_p001.jpg")).toBe(true);
+  });
+
+  it("拒绝资料列表文件名", () => {
+    expect(isPreviewImage("资料列表_01.jpg")).toBe(false);
+    expect(isPreviewImage("资料列表_99.jpg")).toBe(false);
+    expect(isPreviewImage("资料列表_001.jpg")).toBe(false);
+  });
+
+  it("拒绝任意 JPG 文件名", () => {
+    expect(isPreviewImage("photo.jpg")).toBe(false);
+    expect(isPreviewImage("IMG_2024.jpg")).toBe(false);
+  });
+
+  it("拒绝 _p 后无数字的文件", () => {
+    expect(isPreviewImage("report_p.jpg")).toBe(false);
+    expect(isPreviewImage("report_pabc.jpg")).toBe(false);
+  });
+
+  it("buildPageImageFileName 输出始终返回 true（不变量）", () => {
+    expect(isPreviewImage(buildPageImageFileName("any", 1))).toBe(true);
+    expect(isPreviewImage(buildPageImageFileName("any", 999))).toBe(true);
+    expect(isPreviewImage(buildPageImageFileName("foo/bar", 42))).toBe(true);
   });
 });
 

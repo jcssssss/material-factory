@@ -107,17 +107,30 @@ export type LogEntry = {
   pageNumber?: number;
 };
 
+// 执行阶段标识。
+export type StageKind = "pdf_convert" | "material_list" | "print_compose";
+
+// 单个阶段的执行进度。
+export type StageProgress = {
+  stage: StageKind;
+  done: number;
+  total: number;
+  detail?: string;
+};
+
 // 当前执行进度：TaskProgressPanel 展示用。
+// 采用阶段管线模型：任务执行拆分为有序阶段，每个阶段独立上报 done/total。
 export type ExecutionProgress = {
   taskId: string;
-  currentPdfName?: string;
-  currentPage?: number;
-  totalPages?: number;
+  // 预计算：任务实际会执行的阶段列表（按顺序）
+  plannedStages: StageKind[];
+  // 当前活跃阶段
+  currentStage: StageProgress | null;
+  // 已完成阶段
+  completedStages: StageKind[];
+  // 汇总统计（历史/日志展示用）
   successPages: number;
   failedPages: number;
-  // v1.3.0：仿打印图片合成进度
-  printDone?: number;
-  printTotal?: number;
 };
 
 export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {

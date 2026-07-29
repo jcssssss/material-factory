@@ -3,6 +3,7 @@
 // 覆盖 SubTask 10.1 验证项：
 //   - sortDirectoryChildren：文件夹优先 + 同类按名称升序（不区分大小写）
 //   - paginateChildren：默认 25 项/页，超项自动拆分，空数组返回空
+//   - stripLeadingNumber：去除资料名称前序号前缀（如 "1. 项目.pdf" → "项目.pdf"）
 //   - formatImageFilename：< 100 两位零填充，≥ 100 升级三位零填充
 
 import { describe, it, expect } from "vitest";
@@ -11,6 +12,7 @@ import {
   paginateChildren,
   formatImageFilename,
   DEFAULT_MAX_ITEMS_PER_PAGE,
+  stripLeadingNumber,
 } from "../layoutEngine";
 import type { FolderTreeNode } from "../../../types/materialList";
 
@@ -43,6 +45,46 @@ function makeDir(name: string, children: FolderTreeNode[] = []): FolderTreeNode 
     children,
   };
 }
+
+// ─── stripLeadingNumber ───
+
+describe("stripLeadingNumber", () => {
+  it("去除 '1. ' 前缀", () => {
+    expect(stripLeadingNumber("1. 项目计划书.pdf")).toBe("项目计划书.pdf");
+  });
+
+  it("去除 '01-' 前缀", () => {
+    expect(stripLeadingNumber("01-项目计划书.pdf")).toBe("项目计划书.pdf");
+  });
+
+  it("去除 '1、' 前缀", () => {
+    expect(stripLeadingNumber("1、项目计划书.pdf")).toBe("项目计划书.pdf");
+  });
+
+  it("去除 '01_ ' 前缀", () => {
+    expect(stripLeadingNumber("01_项目计划书.pdf")).toBe("项目计划书.pdf");
+  });
+
+  it("无序号时保持不变", () => {
+    expect(stripLeadingNumber("项目计划书.pdf")).toBe("项目计划书.pdf");
+  });
+
+  it("保留中间的数字（非前缀）", () => {
+    expect(stripLeadingNumber("2024年报告.pdf")).toBe("2024年报告.pdf");
+  });
+
+  it("保留名称末尾的数字", () => {
+    expect(stripLeadingNumber("文档v2.pdf")).toBe("文档v2.pdf");
+  });
+
+  it("处理 '1.' 无空格前缀", () => {
+    expect(stripLeadingNumber("1.项目.pdf")).toBe("项目.pdf");
+  });
+
+  it("空字符串不报错", () => {
+    expect(stripLeadingNumber("")).toBe("");
+  });
+});
 
 // ─── sortDirectoryChildren ───
 
@@ -200,6 +242,18 @@ describe("paginateChildren", () => {
       { fileType: "folder", name: "folder1", isDir: true },
       { fileType: "pdf", name: "doc.pdf", isDir: false },
       { fileType: "excel", name: "sheet.xlsx", isDir: false },
+    ]);
+  });
+
+  it("名称前的序号被去除", () => {
+    const children = [
+      makeFile("1. 第一章.pdf", "pdf"),
+      makeFile("2. 第二章.pdf", "pdf"),
+    ];
+    const pages = paginateChildren(children);
+    expect(pages[0].items.map((i) => i.name)).toEqual([
+      "第一章.pdf",
+      "第二章.pdf",
     ]);
   });
 

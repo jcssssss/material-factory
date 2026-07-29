@@ -3,6 +3,7 @@ import WorkbenchPage from "../pages/WorkbenchPage";
 import HistoryPage from "../pages/HistoryPage";
 import LogViewerPage from "../pages/LogViewerPage";
 import BackgroundTemplatePage from "../pages/BackgroundTemplatePage";
+import WatermarkPage from "../pages/WatermarkPage";
 import CalibratePage from "../pages/CalibratePage";
 
 export type RouteDef = {
@@ -16,5 +17,6 @@ export const routes: RouteDef[] = [
   { path: "/history", label: "历史任务", element: <HistoryPage /> },
   { path: "/logs", label: "日志", element: <LogViewerPage /> },
   { path: "/backgrounds", label: "背景模板", element: <BackgroundTemplatePage /> },
+  { path: "/watermark", label: "去水印", element: <WatermarkPage /> },
   { path: "/calibrate/:id", label: "透视标定", element: <CalibratePage /> },
 ];

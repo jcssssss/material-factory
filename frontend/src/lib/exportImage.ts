@@ -8,6 +8,8 @@
 //   渲染高分辨率 Canvas → 计算 3:4 目标画布 → 等比缩放并居中放置 →
 //   导出 JPG Blob → 写入磁盘
 
+import { invoke } from "@tauri-apps/api/core";
+
 // 3:4 目标画布像素尺寸。
 // 2475 x 3300 = 8.25" x 11" @ 300 DPI，正好 3:4，覆盖 A4 / Letter 等常见尺寸。
 export const OUTPUT_WIDTH = 2475;
@@ -189,4 +191,32 @@ export function buildPageImageFileName(
   // 替换文件系统不友好字符，保证跨平台稳定。
   const safeName = pdfBaseName.replace(/[\\/:*?"<>|]/g, "_");
   return `${safeName}_p${padded}.jpg`;
+}
+
+// 判断文件名是否为资料预览图（匹配 buildPageImageFileName 的命名规则）。
+// 预览图格式：{pdfName}_p{至少三位页码}.jpg，如 "咨询报告_p001.jpg"。
+const PREVIEW_IMAGE_RE = /_p\d+\.jpg$/;
+
+export function isPreviewImage(filename: string): boolean {
+  return PREVIEW_IMAGE_RE.test(filename);
+}
+
+// 零序列化写盘：路径作为二进制前缀编码，通过 invoke 顶层 Uint8Array
+// → Tauri 走 octet-stream，避免主线程 JSON 序列化卡顿。
+//
+// body 格式（LE）：[4 字节 u32 path_len][UTF-8 path bytes][JPEG data]
+export async function writeImageToDisk(
+  outPath: string,
+  jpegBytes: Uint8Array,
+): Promise<void> {
+  const encoder = new TextEncoder();
+  const pathBytes = encoder.encode(outPath);
+  const len = pathBytes.length;
+  const header = new Uint8Array(4);
+  new DataView(header.buffer).setUint32(0, len, true); // little-endian
+  const combined = new Uint8Array(4 + len + jpegBytes.length);
+  combined.set(header, 0);
+  combined.set(pathBytes, 4);
+  combined.set(jpegBytes, 4 + len);
+  await invoke<void>("write_image_binary", combined);
 }

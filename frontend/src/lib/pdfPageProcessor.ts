@@ -33,6 +33,7 @@ import {
   exportPageAsJpegBytes,
   buildPageImageFileName,
   calculateFitScale,
+  writeImageToDisk,
 } from "./exportImage";
 import { resolvePageRule } from "./pageRule";
 import { logger } from "./logger";
@@ -255,16 +256,11 @@ export class PdfPageProcessor implements PageProcessor {
         throw classifyWriteError(pdfOutputDir, err);
       }
 
-      // 4. 写入磁盘。
-      //    写盘失败（磁盘满 / 权限）→ 页级失败。
-      // JPG 字节通过 JSON 序列化传给 Rust（write_image_file 接收 Vec<u8>）。
-      // 单页 JPG 通常 200KB-1MB，JSON 开销可接受。
-      // read_pdf_bytes 走二进制通道（PDF 5MB+ 是主要瓶颈），write_image_file 保持 JSON 兼容 WKWebView。
+      // 4. 写入磁盘。写盘失败（磁盘满 / 权限）→ 页级失败。
+      // 路径作为二进制前缀编码到 body，invoke 顶层传 Uint8Array → 零序列化，
+      // 避免原来 Array.from(jpegBytes) → JSON 数字数组字符串在主线程阻塞。
       try {
-        await invoke<void>("write_image_file", {
-          path: outputPath,
-          bytes: Array.from(jpegBytes),
-        });
+        await writeImageToDisk(outputPath, jpegBytes);
       } catch (err) {
         throw classifyWriteError(outputPath, err);
       }

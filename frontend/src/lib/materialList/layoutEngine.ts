@@ -27,6 +27,13 @@ export type LayoutPage = {
 // 与 spec.md "自动分页规则" 一致：单张图片承载 25 项。
 export const DEFAULT_MAX_ITEMS_PER_PAGE = 25;
 
+// 去除资料名称前的序号前缀（如 "1. 项目.pdf" → "项目.pdf"）。
+// 匹配模式：开头数字 + 分隔符（. 、 - _） + 可选空白。
+// 注意：只去掉明确的序号前缀，保留像 "2024年报告.pdf" 中的数字。
+export function stripLeadingNumber(name: string): string {
+  return name.replace(/^\d+\s*[.、\-_]\s*/, "");
+}
+
 // 名称比较函数：不区分大小写的升序比较。
 // 使用 localeCompare 处理中文与数字混合排序，避免纯字节比较导致中文乱序。
 function compareNames(a: string, b: string): number {
@@ -79,7 +86,7 @@ export function paginateChildren(
     const slice = children.slice(i, i + pageSize);
     const items: LayoutItem[] = slice.map((node) => ({
       fileType: node.file_type,
-      name: node.name,
+      name: stripLeadingNumber(node.name),
       isDir: node.is_dir,
     }));
     pages.push({ items });
