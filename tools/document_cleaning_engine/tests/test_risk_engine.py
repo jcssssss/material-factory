@@ -46,10 +46,10 @@ class TestRiskRules:
         level = self.rules.evaluate(detection)
         assert level == RiskLevel.AUTO
 
-    # ── Case 3: 高置信文本水印 → AUTO ──────────────────────────────
+    # ── Case 3: 文本水印 → 始终 CONFIRM ──────────────────────────────
 
-    def test_high_conf_text_watermark_auto(self) -> None:
-        """高置信度含关键词文本水印应为 AUTO。"""
+    def test_high_conf_text_confirm(self) -> None:
+        """文本水印应始终为 CONFIRM（不再根据关键词判断）。"""
         detection = DetectionResult(
             type="text",
             page=5,
@@ -58,12 +58,12 @@ class TestRiskRules:
             metadata={"keyword_score": 30},
         )
         level = self.rules.evaluate(detection)
-        assert level == RiskLevel.AUTO
+        assert level == RiskLevel.CONFIRM
 
-    # ── Case 4: 低置信文本 → IGNORE ────────────────────────────────
+    # ── Case 4: 低置信文本 → 也是 CONFIRM（所有候选都上报）────────
 
-    def test_low_conf_text_ignore(self) -> None:
-        """低置信度文本水印应为 IGNORE。"""
+    def test_low_conf_text_confirm(self) -> None:
+        """低置信度文本水印也为 CONFIRM（所有候选都上报）。"""
         detection = DetectionResult(
             type="text",
             page=3,
@@ -71,12 +71,12 @@ class TestRiskRules:
             content="普通内容",
         )
         level = self.rules.evaluate(detection)
-        assert level == RiskLevel.IGNORE
+        assert level == RiskLevel.CONFIRM
 
     # ── Case 5: 文本水印无关键词 → CONFIRM ─────────────────────────
 
     def test_text_without_keyword_confirm(self) -> None:
-        """文本水印无关键词匹配应为 CONFIRM。"""
+        """文本水印始终为 CONFIRM。"""
         detection = DetectionResult(
             type="text",
             page=2,
@@ -86,10 +86,10 @@ class TestRiskRules:
         level = self.rules.evaluate(detection)
         assert level == RiskLevel.CONFIRM
 
-    # ── Case 6: 高置信页眉 → CONFIRM ───────────────────────────────
+    # ── Case 6: 页眉 → CONFIRM ───────────────────────────────
 
     def test_header_confirm(self) -> None:
-        """高置信度页眉应为 CONFIRM。"""
+        """页眉应为 CONFIRM。"""
         detection = DetectionResult(
             type="header",
             page=1,
@@ -99,41 +99,41 @@ class TestRiskRules:
         level = self.rules.evaluate(detection)
         assert level == RiskLevel.CONFIRM
 
-    # ── Case 7: 低置信页脚 → IGNORE ────────────────────────────────
+    # ── Case 7: 页脚 → CONFIRM ────────────────────────────────
 
-    def test_low_conf_footer_ignore(self) -> None:
-        """低置信度页脚应为 IGNORE。"""
+    def test_low_conf_footer_confirm(self) -> None:
+        """页脚应为 CONFIRM（所有候选都上报）。"""
         detection = DetectionResult(
             type="footer", page=1, confidence=0.5
         )
         level = self.rules.evaluate(detection)
-        assert level == RiskLevel.IGNORE
+        assert level == RiskLevel.CONFIRM
 
-    # ── Case 8: 图片水印各等级 ────────────────────────────────────
+    # ── Case 8: 图片水印 → 始终 CONFIRM ──────────────────────
 
-    def test_image_high_conf_auto(self) -> None:
-        """高置信图片水印（>= 0.8）应为 AUTO。"""
+    def test_image_always_confirm(self) -> None:
+        """图片水印应为 CONFIRM（不再根据置信度分级）。"""
         detection = DetectionResult(
             type="image", page=1, confidence=0.85
         )
         level = self.rules.evaluate(detection)
-        assert level == RiskLevel.AUTO
+        assert level == RiskLevel.CONFIRM
 
     def test_image_medium_conf_confirm(self) -> None:
-        """中等置信图片（0.6-0.8）应为 CONFIRM。"""
+        """中等置信图片也为 CONFIRM。"""
         detection = DetectionResult(
             type="image", page=1, confidence=0.7
         )
         level = self.rules.evaluate(detection)
         assert level == RiskLevel.CONFIRM
 
-    def test_image_low_conf_ignore(self) -> None:
-        """低置信图片（< 0.6）应为 IGNORE。"""
+    def test_image_low_conf_confirm(self) -> None:
+        """低置信图片也为 CONFIRM。"""
         detection = DetectionResult(
             type="image", page=1, confidence=0.5
         )
         level = self.rules.evaluate(detection)
-        assert level == RiskLevel.IGNORE
+        assert level == RiskLevel.CONFIRM
 
 
 class TestRiskScorer:
@@ -219,7 +219,7 @@ class TestRiskEngine:
         assert action.target_type == "annotation"
 
     def test_text_watermark_auto_action(self) -> None:
-        """高置信文本水印应生成 REMOVE_TEXT + AUTO。"""
+        """文本水印应生成 REMOVE_TEXT + CONFIRM。"""
         detections = [
             DetectionResult(
                 type="text",
@@ -232,11 +232,11 @@ class TestRiskEngine:
         assert len(plan.actions) == 1
         action = plan.actions[0]
         assert action.action_type == "REMOVE_TEXT"
-        assert action.risk_level == RiskLevel.AUTO
+        assert action.risk_level == RiskLevel.CONFIRM
         assert action.risk_score > 0
 
     def test_mixed_detections(self) -> None:
-        """混合检测结果应生成混合风险等级。"""
+        """混合检测结果 — 所有类型都上报。"""
         detections = [
             DetectionResult(type="annotation", page=1, confidence=1.0),
             DetectionResult(type="header", page=1, confidence=0.85, content="Header"),
@@ -247,8 +247,7 @@ class TestRiskEngine:
 
         levels = {a.risk_level for a in plan.actions}
         assert RiskLevel.AUTO in levels  # annotation
-        assert RiskLevel.CONFIRM in levels  # header
-        assert RiskLevel.IGNORE in levels  # low conf image
+        assert RiskLevel.CONFIRM in levels  # header + image（不再有 IGNORE）
 
         # 整体风险应为 AUTO
         assert plan.risk_level == RiskLevel.AUTO
@@ -262,13 +261,13 @@ class TestRiskEngine:
         plan = self.engine.evaluate(detections)
         assert plan.risk_level == RiskLevel.CONFIRM
 
-    def test_all_ignore_plan_risk(self) -> None:
-        """只有 IGNORE 时整体风险应为 IGNORE。"""
+    def test_all_confirm_plan_risk_v2(self) -> None:
+        """所有检测结果都是 CONFIRM 时整体应为 CONFIRM。"""
         detections = [
             DetectionResult(type="image", page=1, confidence=0.3),
         ]
         plan = self.engine.evaluate(detections)
-        assert plan.risk_level == RiskLevel.IGNORE
+        assert plan.risk_level == RiskLevel.CONFIRM
 
     def test_cleaning_action_fields(self) -> None:
         """CleaningAction 字段应正确填充。"""

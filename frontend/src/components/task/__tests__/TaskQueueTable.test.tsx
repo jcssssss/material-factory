@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import { TaskQueueTable } from "../TaskQueueTable";
 import { useTaskStore } from "../../../store/useTaskStore";
 
@@ -34,16 +35,20 @@ const mockTask = (overrides: Record<string, any> = {}) => ({
   ...overrides,
 });
 
+function renderTable() {
+  return render(<TaskQueueTable />, { wrapper: MemoryRouter });
+}
+
 describe("TaskQueueTable", () => {
   it("队列为空时显示空状态", () => {
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("队列暂无任务")).toBeInTheDocument();
     expect(screen.getByText(/在左侧表单中创建任务/)).toBeInTheDocument();
   });
 
   it("有任务时渲染表格行", () => {
     useTaskStore.getState().enqueueTask(mockTask());
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("测试任务")).toBeInTheDocument();
     expect(screen.getByText("待执行")).toBeInTheDocument();
   });
@@ -51,27 +56,27 @@ describe("TaskQueueTable", () => {
   it("表格显示任务数量", () => {
     useTaskStore.getState().enqueueTask(mockTask());
     useTaskStore.getState().enqueueTask(mockTask({ taskId: "task_2", taskName: "任务2" }));
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("共 2 个")).toBeInTheDocument();
   });
 
   it("展示页码规则列", () => {
     useTaskStore.getState().enqueueTask(mockTask());
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("前 3 页")).toBeInTheDocument();
   });
 
   it("清空按钮清空队列", async () => {
     const user = userEvent.setup();
     useTaskStore.getState().enqueueTask(mockTask());
-    render(<TaskQueueTable />);
+    renderTable();
     await user.click(screen.getByText("清空"));
     expect(useTaskStore.getState().queue).toHaveLength(0);
   });
 
   it("pending 状态显示「移除」按钮", () => {
     useTaskStore.getState().enqueueTask(mockTask());
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("移除")).toBeInTheDocument();
   });
 
@@ -80,7 +85,7 @@ describe("TaskQueueTable", () => {
     useTaskStore.getState().enqueueTask(mockTask({ status: "running" }));
     useTaskStore.getState().setCurrentTaskId("task_test");
     useTaskStore.getState().setController(ctrl);
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("暂停")).toBeInTheDocument();
   });
 
@@ -89,7 +94,7 @@ describe("TaskQueueTable", () => {
     useTaskStore.getState().enqueueTask(mockTask({ status: "paused" }));
     useTaskStore.getState().setCurrentTaskId("task_test");
     useTaskStore.getState().setController(ctrl);
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("继续")).toBeInTheDocument();
     expect(screen.getByText("取消")).toBeInTheDocument();
   });
@@ -97,7 +102,7 @@ describe("TaskQueueTable", () => {
   it("completed 状态显示「移除」而非控制按钮", () => {
     useTaskStore.getState().enqueueTask(mockTask({ status: "completed" }));
     useTaskStore.getState().setCurrentTaskId("task_test");
-    render(<TaskQueueTable />);
+    renderTable();
     expect(screen.getByText("移除")).toBeInTheDocument();
     expect(screen.queryByText("暂停")).toBeNull();
     expect(screen.queryByText("取消")).toBeNull();
@@ -106,7 +111,7 @@ describe("TaskQueueTable", () => {
   it("点击移除从队列删除", async () => {
     const user = userEvent.setup();
     useTaskStore.getState().enqueueTask(mockTask());
-    render(<TaskQueueTable />);
+    renderTable();
     await user.click(screen.getByText("移除"));
     expect(useTaskStore.getState().queue).toHaveLength(0);
   });

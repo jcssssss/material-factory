@@ -988,3 +988,80 @@ SKIPPED
 * Header/Footer遍历；
 * python-docx + lxml分层处理架构；
 * Word清理任务基础框架。
+
+
+
+
+Task-008 完成报告
+     
+  1. 新增/修改文件列表
+     
+  tools/document_cleaning_engine/
+  ├── models/
+  │   └── header_footer.py                 # HeaderFooterInfo 数据模型
+  ├── detector/
+  │   └── header_footer_detector.py        # [修改] origin 使用 span origin +
+  font_size
+  ├── cleaner/
+  │   ├── header_footer_cleaner.py         # HeaderFooterCleaner
+  │   └── pdf_cleaner.py                   # [修改] 路由
+  REMOVE_HEADER/REMOVE_FOOTER
+  └── tests/
+      ├── test_header_footer_detector.py   # 4 个测试
+      └── test_header_footer_cleaner.py    # 5 个测试
+  
+  2. Header/Footer 算法说明
+  
+  检测区域：
+
+  ┌────────┬───────────────┬────────────────────┐
+  │  区域  │   页面范围    │        阈值        │
+  ├────────┼───────────────┼────────────────────┤
+  │ Header │ 顶部 0%-15%   │ page_height × 0.15 │
+  ├────────┼───────────────┼────────────────────┤
+  │ Footer │ 底部 85%-100% │ page_height × 0.85 │
+  └────────┴───────────────┴────────────────────┘
+  
+  流程： 提取 span → 区域过滤 → 按文本分组 → 跨页重复分析 → 评分 → 输出
+  DetectionResult
+
+  3. 评分模型（100 分制）
+  
+  ┌────────────┬──────┬──────────────────────────────────────┐
+  │    维度    │ 满分 │                 说明                 │
+  ├────────────┼──────┼──────────────────────────────────────┤
+  │ 跨页重复率 │ 40   │ repeat_rate × 40                     │
+  ├────────────┼──────┼──────────────────────────────────────┤
+  │ 位置       │ 25   │ 顶部固定区域 = 25，底部固定区域 = 25 │
+  ├────────────┼──────┼──────────────────────────────────────┤
+  │ 字体大小   │ 15   │ 8-12pt 得 15 分                      │
+  ├────────────┼──────┼──────────────────────────────────────┤
+  │ 距离正文   │ 10   │ 与正文间距越大分越高                 │
+  ├────────────┼──────┼──────────────────────────────────────┤
+  │ 文本长度   │ 10   │ 短文本（≤10 字符）= 10 分            │
+  └────────────┴──────┴──────────────────────────────────────┘
+
+  策略： ≥ 0.8 → CONFIRM，< 0.8 → IGNORE（不自动删除）
+
+  4. 删除策略说明
+
+  HeaderFooterCleaner 复用 Task-007 的 ContentStreamParser 和 TextMatcher：
+  1. 从 Action metadata 提取 origin
+  2. 通过 TextMatcher 定位 Content Stream 中的 Tm 矩阵
+  3. 删除对应的 Tj/TJ 绘制指令
+  4. Form XObject 保护：存在时输出 SKIPPED
+  
+  与 Task-007 区别： 定位目标相同（Content Stream Tj/TJ），但删除策略更保守（默认
+  CONFIRM 非 AUTO）
+
+  5. 测试结果
+  
+  90 passed in 1.84s
+
+  6. 当前限制
+
+  - Form XObject 内嵌页眉页脚：V1 不处理，输出 SKIPPED (FORM_XOBJECT_HEADER_FOOTER)
+  - 页码：识别为 footer，默认 CONFIRM（用户确认后才删除）
+  - 图片页眉页脚：超出文本检测范围，V1 不处理
+  - 正文误判保护：仅出现在一页的顶部文本，因重复率低（repetition_score=13.3/40），
+  总分约 68 → 低于 0.8 阈值，不会进入 CleaningPlan

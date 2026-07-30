@@ -29,7 +29,7 @@ beforeEach(() => {
 describe("PageRuleInput", () => {
   it("默认选中「前 N 页」模式", () => {
     render(<PageRuleInput />);
-    const firstNInput = screen.getByPlaceholderText("例如：5");
+    const firstNInput = screen.getByPlaceholderText("2");
     expect(firstNInput).toBeInTheDocument();
   });
 
@@ -44,7 +44,7 @@ describe("PageRuleInput", () => {
     const user = userEvent.setup();
     render(<PageRuleInput />);
     await user.click(screen.getByText("混合"));
-    expect(screen.getByPlaceholderText("例如：5")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("2")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("例如：1,3,5-8")).toBeInTheDocument();
   });
 
@@ -67,7 +67,10 @@ describe("PageRuleInput", () => {
   it("前 N 页输入空值时 firstN 为 undefined", async () => {
     const user = userEvent.setup();
     render(<PageRuleInput />);
-    const input = screen.getByPlaceholderText("例如：5");
+    const input = screen.getByPlaceholderText("2");
+    // 默认值为 2，先清空再验证
+    await user.clear(input);
+    expect(useTaskStore.getState().draft.firstN).toBeUndefined();
     await user.type(input, "3");
     expect(useTaskStore.getState().draft.firstN).toBe(3);
     await user.clear(input);
@@ -77,7 +80,8 @@ describe("PageRuleInput", () => {
   it("前 N 页输入非法值时 firstN 为 undefined", async () => {
     const user = userEvent.setup();
     render(<PageRuleInput />);
-    const input = screen.getByPlaceholderText("例如：5");
+    const input = screen.getByPlaceholderText("2");
+    await user.clear(input);
     await user.type(input, "0");
     expect(useTaskStore.getState().draft.firstN).toBeUndefined();
   });

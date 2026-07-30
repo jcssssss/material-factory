@@ -49,8 +49,10 @@ class TestTextWatermarkDetector:
         """检测结果应包含 origin 供 Cleaner 使用。"""
         doc = fitz.open()
         try:
-            page = doc.new_page()
-            page.insert_text((150, 420), "Draft", fontsize=36)
+            # 跨页重复才能被检测到
+            for _ in range(3):
+                page = doc.new_page()
+                page.insert_text((150, 420), "Draft", fontsize=36)
 
             results = self.detector.detect(doc)
             if results:

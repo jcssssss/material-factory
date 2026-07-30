@@ -28,14 +28,14 @@ describe("StatusBadge", () => {
 
   it("completed 使用成功色调", () => {
     const { container } = render(<StatusBadge status="completed" />);
-    const badge = container.querySelector("span.inline-flex");
+    const badge = container.querySelector("div.inline-flex");
     expect(badge?.className).toContain("bg-emerald");
   });
 
   it("failed 使用危险色调", () => {
     const { container } = render(<StatusBadge status="failed" />);
-    const badge = container.querySelector("span.inline-flex");
-    expect(badge?.className).toContain("bg-red");
+    const badge = container.querySelector("div.inline-flex");
+    expect(badge?.className).toContain("bg-destructive");
   });
 });
 
@@ -47,13 +47,13 @@ describe("ToneBadge", () => {
 
   it("success 使用 emerald 色系", () => {
     const { container } = render(<ToneBadge tone="success">OK</ToneBadge>);
-    const badge = container.querySelector("span.inline-flex");
+    const badge = container.querySelector("div.inline-flex");
     expect(badge?.className).toContain("bg-emerald");
   });
 
   it("danger 使用 red 色系", () => {
     const { container } = render(<ToneBadge tone="danger">失败</ToneBadge>);
-    const badge = container.querySelector("span.inline-flex");
-    expect(badge?.className).toContain("bg-red");
+    const badge = container.querySelector("div.inline-flex");
+    expect(badge?.className).toContain("bg-destructive");
   });
 });

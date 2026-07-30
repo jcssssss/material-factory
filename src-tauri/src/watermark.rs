@@ -17,6 +17,7 @@
 //   - Annotation 水印：直接从 /Annots 数组中删除
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -108,6 +109,74 @@ pub struct WatermarkResult {
     pub error: Option<String>,
     pub report: Option<WatermarkReport>,
     pub removal: Option<WatermarkRemovalResult>,
+}
+
+// ─── 前端对齐数据结构 ───
+
+/// 检测项类型（与前端 DetectionType 对齐）。
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum DetectionType {
+    Watermark,
+    Header,
+    Footer,
+}
+
+/// 单项检测结果（与前端 DetectionItem 对齐）。
+/// 注意 bbox 是归一化坐标 (x0,y0,x1,y1)，值域 0.0~1.0，
+/// 前端不直接展示但传回给清理命令使用。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DetectionItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub item_type: DetectionType,
+    pub sub_type: String,
+    pub name: String,
+    pub page: u32,
+    pub location: String,
+    pub confidence: u32,
+    pub marked_for_deletion: bool,
+    pub bbox: (f64, f64, f64, f64),
+}
+
+/// 单个文件的检测结果（与前端 FileDetectionResult 对齐）。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDetectionResult {
+    pub file_name: String,
+    pub items: Vec<DetectionItem>,
+}
+
+/// 文件级清理结果。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FileCleanResult {
+    pub file_name: String,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// 清理报告（与前端 CleanReport 对齐）。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanReportResult {
+    pub task_id: String,
+    pub total_files: u32,
+    pub success_count: u32,
+    pub failed_count: u32,
+    pub skipped_count: u32,
+    pub files: Vec<FileCleanResult>,
+    pub completed_at: String,
+}
+
+/// 清理请求项。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanRequest {
+    pub input_path: String,
+    pub output_dir: String,
+    pub items_to_remove: Vec<DetectionItem>,
 }
 
 // ─── 内部类型 ───
@@ -1025,6 +1094,279 @@ pub fn batch_remove_watermarks(requests: Vec<WatermarkRequest>) -> Result<Vec<Wa
         }
     }
     Ok(results)
+}
+
+// ─── 转换函数 ───
+
+fn region_to_detection_item(region: &RegionInfo) -> DetectionItem {
+    let (sub_type, d_type) = match region.region_type {
+        RegionType::Watermark => ("文字水印".into(), DetectionType::Watermark),
+        RegionType::ImageWatermark => ("图片水印".into(), DetectionType::Watermark),
+        RegionType::FormWatermark => ("Form 水印".into(), DetectionType::Watermark),
+        RegionType::AnnotationWatermark => ("标注水印".into(), DetectionType::Watermark),
+        RegionType::Header => ("文字页眉".into(), DetectionType::Header),
+        RegionType::Footer => ("文字页脚".into(), DetectionType::Footer),
+        RegionType::PageNumber => ("页码".into(), DetectionType::Footer),
+    };
+
+    // 根据位置计算描述
+    let norm_y = region.bbox.1 + (region.bbox.3 - region.bbox.1) * 0.5;
+    let location_desc = if norm_y > 0.85 {
+        format!("顶部 (y: {:.0}%)", norm_y * 100.0)
+    } else if norm_y < 0.12 {
+        format!("底部 (y: {:.0}%)", norm_y * 100.0)
+    } else {
+        format!(
+            "页面中心 (x: {:.0}%, y: {:.0}%)",
+            (region.bbox.0 + region.bbox.2) * 50.0,
+            norm_y * 100.0
+        )
+    };
+
+    DetectionItem {
+        id: format!("detect_{}_{}", region.page_number, region.text.chars().take(8).collect::<String>()),
+        item_type: d_type,
+        sub_type,
+        name: String::new(),
+        page: region.page_number,
+        location: location_desc,
+        confidence: 85u32,
+        marked_for_deletion: true,
+        bbox: region.bbox,
+    }
+}
+
+fn assign_item_names(items: &mut [DetectionItem]) {
+    let mut wm_count = 0u32;
+    let mut hdr_count = 0u32;
+    let mut ftr_count = 0u32;
+    for item in items.iter_mut() {
+        match item.item_type {
+            DetectionType::Watermark => {
+                wm_count += 1;
+                item.name = format!("水印{:02}", wm_count);
+            }
+            DetectionType::Header => {
+                hdr_count += 1;
+                item.name = format!("页眉{:02}", hdr_count);
+            }
+            DetectionType::Footer => {
+                ftr_count += 1;
+                item.name = format!("页脚{:02}", ftr_count);
+            }
+        }
+    }
+}
+
+// ─── 前端对齐 Tauri 命令 ───
+
+/// 扫描单个 PDF 文件，返回前端对齐的检测结果。
+#[tauri::command]
+pub fn scan_document(file_path: String) -> Result<FileDetectionResult, String> {
+    let report = detect_watermarks(&file_path)?;
+    let file_name = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_path)
+        .to_string();
+
+    let mut items: Vec<DetectionItem> = report
+        .regions
+        .iter()
+        .map(|r| region_to_detection_item(r))
+        .collect();
+    assign_item_names(&mut items);
+
+    Ok(FileDetectionResult { file_name, items })
+}
+
+/// 批量扫描多个 PDF 文件。
+#[tauri::command]
+pub fn scan_documents(file_paths: Vec<String>) -> Result<Vec<FileDetectionResult>, String> {
+    file_paths
+        .into_iter()
+        .map(|p| scan_document(p))
+        .collect()
+}
+
+// ─── 清理命令 ───
+
+fn detection_item_to_region_info(item: &DetectionItem) -> RegionInfo {
+    let region_type = match item.item_type {
+        DetectionType::Watermark => RegionType::Watermark,
+        DetectionType::Header => RegionType::Header,
+        DetectionType::Footer => RegionType::Footer,
+    };
+    RegionInfo {
+        page_number: item.page,
+        text: item.sub_type.clone(),
+        region_type,
+        bbox: item.bbox,
+        xobject_id: None,
+    }
+}
+
+fn now_iso() -> String {
+    let d = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = d.as_secs();
+    // 简单 ISO 格式：取 UTC 时间
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    // 从 1970-01-01 推算年月日（简单实现，不用外部 crate）
+    let mut y = 1970i64;
+    let mut remaining = days as i64;
+    loop {
+        let days_in_year = if is_leap(y) { 366 } else { 365 };
+        if remaining < days_in_year { break; }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let month_days = if is_leap(y) {
+        [31,29,31,30,31,30,31,31,30,31,30,31]
+    } else {
+        [31,28,31,30,31,30,31,31,30,31,30,31]
+    };
+    let mut m = 1usize;
+    for &md in &month_days {
+        if remaining < md { break; }
+        remaining -= md;
+        m += 1;
+    }
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, remaining + 1, hours, minutes, seconds
+    )
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// 执行单个文件的清理操作。
+#[tauri::command]
+pub fn execute_clean(request: CleanRequest) -> Result<CleanReportResult, String> {
+    let regions: Vec<RegionInfo> = request
+        .items_to_remove
+        .iter()
+        .filter(|i| i.marked_for_deletion)
+        .map(detection_item_to_region_info)
+        .collect();
+
+    if regions.is_empty() {
+        // 无标记删除项，原样输出
+        let file_name = std::path::Path::new(&request.input_path)
+            .file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+            .to_string();
+        return Ok(CleanReportResult {
+            task_id: String::new(),
+            total_files: 1,
+            success_count: 1,
+            failed_count: 0,
+            skipped_count: 0,
+            files: vec![FileCleanResult {
+                file_name,
+                status: "success".into(),
+                error: None,
+            }],
+            completed_at: now_iso(),
+        });
+    }
+
+    let output_path = std::path::Path::new(&request.output_dir)
+        .join(
+            std::path::Path::new(&request.input_path)
+                .file_stem()
+                .map(|s| format!("{}_clean.pdf", s.to_string_lossy()))
+                .unwrap_or_else(|| "output_clean.pdf".to_string()),
+        )
+        .to_string_lossy()
+        .to_string();
+
+    // 确保输出目录存在
+    let out_dir = std::path::Path::new(&request.output_dir);
+    if !out_dir.exists() {
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| format!("创建输出目录失败：{e}"))?;
+    }
+
+    let removal = remove_regions_from_pdf(&request.input_path, &output_path, &regions)?;
+
+    let file_name = std::path::Path::new(&request.input_path)
+        .file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        .to_string();
+
+    let status = if removal.removed_count > 0 { "success" } else { "skipped" };
+
+    Ok(CleanReportResult {
+        task_id: String::new(),
+        total_files: 1,
+        success_count: if status == "success" { 1 } else { 0 },
+        failed_count: 0,
+        skipped_count: if status == "skipped" { 1 } else { 0 },
+        files: vec![FileCleanResult {
+            file_name,
+            status: status.into(),
+            error: None,
+        }],
+        completed_at: now_iso(),
+    })
+}
+
+/// 批量清理多个文件。
+#[tauri::command]
+pub fn execute_batch_clean(requests: Vec<CleanRequest>) -> Result<Vec<CleanReportResult>, String> {
+    let mut results = Vec::with_capacity(requests.len());
+    for req in requests {
+        match execute_clean(req) {
+            Ok(report) => results.push(report),
+            Err(e) => results.push(CleanReportResult {
+                task_id: String::new(),
+                total_files: 1,
+                success_count: 0,
+                failed_count: 1,
+                skipped_count: 0,
+                files: vec![FileCleanResult {
+                    file_name: "unknown".into(),
+                    status: "failed".into(),
+                    error: Some(e),
+                }],
+                completed_at: now_iso(),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+/// 汇总多个清理结果为一个最终报告。
+#[tauri::command]
+pub fn generate_clean_report(
+    task_id: String,
+    results: Vec<CleanReportResult>,
+) -> CleanReportResult {
+    let total_files: u32 = results.iter().map(|r| r.total_files).sum();
+    let success_count: u32 = results.iter().map(|r| r.success_count).sum();
+    let failed_count: u32 = results.iter().map(|r| r.failed_count).sum();
+    let skipped_count: u32 = results.iter().map(|r| r.skipped_count).sum();
+    let files: Vec<FileCleanResult> = results
+        .into_iter()
+        .flat_map(|r| r.files)
+        .collect();
+
+    CleanReportResult {
+        task_id,
+        total_files,
+        success_count,
+        failed_count,
+        skipped_count,
+        files,
+        completed_at: now_iso(),
+    }
 }
 
 // ─── 测试 ───

@@ -14,7 +14,9 @@ import { appendLogToDisk } from "./persistence";
 import type { LogLevel, LogScope, LogEntry } from "../types/task";
 
 function now(): string {
-  return new Date().toISOString();
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 // 日志批量缓冲：避免每页处理时多次 appendLog 触发 store 更新导致 UI 全量重渲染。

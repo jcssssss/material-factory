@@ -5,15 +5,65 @@ import type { TaskConfig } from "../../types/task";
 import { FilePickerButton } from "../common/FilePickerButton";
 import { PageRuleInput } from "./PageRuleInput";
 import {
-  validateTaskInput,
   isSupportedInputPath,
 } from "../../lib/inputValidation";
 import { validateFormPageRule } from "../../lib/pageRule";
 import { listTemplates } from "../../lib/printEngine/backgroundDb";
+import { Input } from "../ui/input";
+import { Checkbox } from "../ui/checkbox";
+import { Label } from "../ui/label";
+import { Button } from "../ui/button";
+import { Box, FolderOpen, AlertTriangle, Info, Plus } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "../ui/tooltip";
+import { cn } from "@/lib/utils";
 
 function basename(p: string): string {
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
   return parts[parts.length - 1] ?? p;
+}
+
+type FieldErrors = {
+  taskName?: string;
+  sourcePaths?: string;
+  outputDir?: string;
+};
+
+function computeFieldErrors(draft: {
+  taskName?: string;
+  sourceType?: "files" | "folder";
+  sourcePaths?: string[];
+  outputDir?: string;
+}): FieldErrors {
+  const errors: FieldErrors = {};
+
+  if (!draft.taskName || draft.taskName.trim() === "") {
+    errors.taskName = "请填写任务名";
+  }
+
+  if (!draft.sourcePaths || draft.sourcePaths.length === 0) {
+    errors.sourcePaths =
+      draft.sourceType === "folder"
+        ? "请选择包含 PDF 的文件夹"
+        : "请选择 PDF 文件";
+  } else if (draft.sourceType === "files") {
+    const nonSupported = draft.sourcePaths.filter(
+      (p) => !isSupportedInputPath(p)
+    );
+    if (nonSupported.length > 0) {
+      errors.sourcePaths = `仅支持 PDF 与 Word，包含不支持的文件：${basename(nonSupported[0])}`;
+    }
+  }
+
+  if (!draft.outputDir || draft.outputDir.trim() === "") {
+    errors.outputDir = "请选择输出目录";
+  }
+
+  return errors;
 }
 
 export function TaskForm() {
@@ -24,28 +74,24 @@ export function TaskForm() {
   const navigate = useNavigate();
   const [showCalibrationAlert, setShowCalibrationAlert] = useState(false);
 
-  const validation = useMemo(() => {
-    const inputError = validateTaskInput({
-      taskName: draft.taskName,
-      sourceType: draft.sourceType ?? "files",
-      sourcePaths: draft.sourcePaths ?? [],
-      outputDir: draft.outputDir,
-    });
-    if (inputError) return { ok: false, message: inputError };
+  const fieldErrors = useMemo(() => computeFieldErrors({
+    taskName: draft.taskName,
+    sourceType: draft.sourceType,
+    sourcePaths: draft.sourcePaths,
+    outputDir: draft.outputDir,
+  }), [draft.taskName, draft.sourceType, draft.sourcePaths, draft.outputDir]);
 
-    const pageRuleError = validateFormPageRule({
-      firstN:
-        draft.pageRuleMode === "custom" ? undefined : draft.firstN,
-      customPages:
-        draft.pageRuleMode === "firstN" ? undefined : draft.customPages,
-    });
-    if (pageRuleError) return { ok: false, message: pageRuleError };
+  const pageRuleError = useMemo(() => validateFormPageRule({
+    firstN: draft.pageRuleMode === "custom" ? undefined : draft.firstN,
+    customPages: draft.pageRuleMode === "firstN" ? undefined : draft.customPages,
+  }), [draft.pageRuleMode, draft.firstN, draft.customPages]);
 
-    return { ok: true, message: "" };
-  }, [draft]);
+  const validationOk = useMemo(() =>
+    !fieldErrors.taskName && !fieldErrors.sourcePaths && !fieldErrors.outputDir && !pageRuleError
+  , [fieldErrors, pageRuleError]);
 
   function handleAddToQueue() {
-    if (!validation.ok || !draft.taskName || !draft.outputDir) return;
+    if (!validationOk || !draft.taskName || !draft.outputDir) return;
     const task: TaskConfig = {
       taskId: createTaskId(),
       taskName: draft.taskName.trim(),
@@ -87,60 +133,62 @@ export function TaskForm() {
       : "尚未选择";
 
   return (
-    <div className="flex flex-col gap-5 rounded-xl border border-workspace-border/60 bg-workspace-surface p-5 shadow-card">
-      <div className="flex items-center justify-between">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-workspace-fg">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 text-workspace-accent">
-            <path d="M10.362 1.093a.75.75 0 00-.724 0L2.523 5.018 10 9.143l7.477-4.125-7.115-3.925zM18 6.443l-7.25 4v8.25l6.862-3.786A.75.75 0 0018 14.25V6.443zm-8.75 12.25v-8.25l-7.25-4v7.807a.75.75 0 00.388.657l6.862 3.786z" />
-          </svg>
-          新建任务
-        </h2>
-        <span className="text-[11px] text-workspace-muted">一个任务对应一个商品</span>
+    <div className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-card">
+      <div className="flex items-center gap-2">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+          <Box className="h-4 w-4 text-primary" />
+        </div>
+        <h2 className="text-sm font-semibold">新建任务</h2>
       </div>
 
-      <label className="flex flex-col gap-1.5 text-sm">
-        <span className="text-xs font-medium text-workspace-fg-secondary">任务名</span>
-        <input
-          type="text"
+      {/* 任务名 */}
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs font-medium text-muted-foreground">任务名</Label>
+        <Input
           placeholder="例如：夏凉被系列 A"
           value={draft.taskName ?? ""}
           onChange={(e) => setDraft({ taskName: e.target.value })}
-          className="w-full rounded-lg border border-workspace-border bg-white px-3 py-2 text-sm transition placeholder:text-workspace-muted/60 focus:border-workspace-accent focus:ring-2 focus:ring-workspace-accent/10 focus:outline-none"
+          className={cn("h-9", fieldErrors.taskName && "border-destructive")}
         />
-      </label>
+        {fieldErrors.taskName && (
+          <span className="flex items-center gap-1 text-xs text-destructive">
+            <AlertTriangle className="h-3 w-3" />
+            {fieldErrors.taskName}
+          </span>
+        )}
+      </div>
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="text-xs font-medium text-workspace-fg-secondary">输入来源</span>
-          <div className="flex rounded-lg border border-workspace-border/60 bg-white p-0.5 text-xs shadow-sm">
-            <button
-              type="button"
-              onClick={() => setDraft({ sourceType: "folder", sourcePaths: [] })}
-              className={
-                "rounded-md px-2.5 py-1 font-medium transition-all " +
-                (draft.sourceType === "folder"
-                  ? "bg-workspace-accent text-white shadow-sm"
-                  : "text-workspace-fg-secondary hover:text-workspace-fg")
-              }
-            >
-              文件夹
-            </button>
-            <button
-              type="button"
-              onClick={() => setDraft({ sourceType: "files", sourcePaths: [] })}
-              className={
-                "rounded-md px-2.5 py-1 font-medium transition-all " +
-                (draft.sourceType === "files"
-                  ? "bg-workspace-accent text-white shadow-sm"
-                  : "text-workspace-fg-secondary hover:text-workspace-fg")
-              }
-            >
-              文件
-            </button>
-          </div>
+      {/* 输入来源 */}
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs font-medium text-muted-foreground">输入来源</Label>
+        <div className="flex rounded-lg border bg-background p-0.5 text-xs shadow-sm w-fit">
+          <button
+            type="button"
+            onClick={() => setDraft({ sourceType: "folder", sourcePaths: [] })}
+            className={cn(
+              "rounded-md px-2.5 py-1 font-medium transition-all",
+              draft.sourceType === "folder"
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            文件夹
+          </button>
+          <button
+            type="button"
+            onClick={() => setDraft({ sourceType: "files", sourcePaths: [] })}
+            className={cn(
+              "rounded-md px-2.5 py-1 font-medium transition-all",
+              draft.sourceType === "files"
+                ? "bg-primary text-primary-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            文件
+          </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-3">
           {draft.sourceType === "folder" ? (
             <FilePickerButton
               mode="folder"
@@ -161,138 +209,144 @@ export function TaskForm() {
               />
             </>
           )}
-          <span className="text-xs text-workspace-muted">{sourceLabel}</span>
+          <span className="truncate text-xs text-muted-foreground">{sourceLabel}</span>
         </div>
 
-        {draft.sourcePaths && draft.sourcePaths.length > 0 ? (
-          <ul className="max-h-32 overflow-auto rounded-lg border border-workspace-border/60 bg-slate-50/60 px-3 py-1.5 text-xs text-workspace-fg-secondary">
+        {draft.sourcePaths && draft.sourcePaths.length > 0 && (
+          <div className="max-h-24 overflow-auto rounded-lg border bg-muted/30 px-3 py-1.5 text-xs text-muted-foreground leading-relaxed">
             {draft.sourcePaths.slice(0, 12).map((p, idx) => (
-              <li key={`${p}-${idx}`} className="flex items-center gap-1.5 py-0.5" title={p}>
-                <span className="text-workspace-muted">{idx + 1}.</span>
-                <span className={isSupportedInputPath(p) ? "" : "text-workspace-danger"}>
+              <span key={`${p}-${idx}`} title={p} className="mr-3 inline-flex items-center gap-1">
+                <span className="text-muted-foreground/60">{idx + 1}.</span>
+                <span className={isSupportedInputPath(p) ? "" : "text-destructive"}>
                   {basename(p)}
                 </span>
-              </li>
+              </span>
             ))}
-            {draft.sourcePaths.length > 12 ? (
-              <li className="py-0.5 text-workspace-muted">
-                …还有 {draft.sourcePaths.length - 12} 个
-              </li>
-            ) : null}
-          </ul>
-        ) : null}
+            {draft.sourcePaths.length > 12 && (
+              <span className="text-muted-foreground">…还有 {draft.sourcePaths.length - 12} 个</span>
+            )}
+          </div>
+        )}
+        {fieldErrors.sourcePaths && (
+          <span className="flex items-center gap-1 text-xs text-destructive">
+            <AlertTriangle className="h-3 w-3" />
+            {fieldErrors.sourcePaths}
+          </span>
+        )}
       </div>
 
+      {/* 页码规则 */}
       <PageRuleInput />
+      {pageRuleError && (
+        <span className="flex items-center gap-1 text-xs text-destructive -mt-2">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3 w-3">
+            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z" clipRule="evenodd" />
+          </svg>
+          {pageRuleError}
+        </span>
+      )}
 
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
+      {/* 生成资料列表展示图 */}
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="generate-material-list"
           checked={draft.generateMaterialList ?? false}
-          onChange={(e) => setDraft({ generateMaterialList: e.target.checked })}
-          className="h-4 w-4 rounded border-workspace-border text-workspace-accent focus:ring-workspace-accent"
+          onCheckedChange={(checked) =>
+            setDraft({ generateMaterialList: checked === true })
+          }
         />
-        <span className="text-workspace-fg-secondary">同时生成资料列表展示图</span>
-        {draft.sourceType !== "folder" ? (
-          <span className="text-xs text-workspace-muted">（仅文件夹模式生效）</span>
-        ) : null}
-      </label>
-
-      <div className="space-y-2">
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            checked={draft.generatePrintImages ?? false}
-            onChange={(e) => handlePrintImagesToggle(e.target.checked)}
-            className="h-4 w-4 rounded border-workspace-border text-workspace-accent focus:ring-workspace-accent"
-          />
-          <span className="text-workspace-fg-secondary">图片合成（仿打印效果）</span>
-          <a
-            href="#/backgrounds"
-            className="text-xs font-medium text-indigo-500 underline transition hover:text-indigo-700"
-          >
-            [背景模板]
-          </a>
-        </label>
-        <p className="ml-6 text-xs text-workspace-muted">
-          透视贴合 A4 纸 · Multiply 正片叠底 · 随机匹配背景
-        </p>
+        <Label htmlFor="generate-material-list" className="text-xs font-normal text-muted-foreground cursor-pointer">
+          同时生成资料列表展示图
+        </Label>
+        {draft.sourceType !== "folder" && (
+          <span className="text-xs text-muted-foreground">（仅文件夹模式生效）</span>
+        )}
       </div>
 
-      <div className="flex flex-col gap-2 text-sm">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-medium text-workspace-fg-secondary">输出根目录</span>
+      {/* 图片合成 */}
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="generate-print-images"
+          checked={draft.generatePrintImages ?? false}
+          onCheckedChange={(checked) =>
+            handlePrintImagesToggle(checked === true)
+          }
+        />
+        <Label htmlFor="generate-print-images" className="text-xs font-normal text-muted-foreground cursor-pointer">
+          图片合成（仿打印效果）
+        </Label>
+        <a
+          href="#/backgrounds"
+          className="text-xs font-medium text-primary underline transition hover:text-primary/80"
+        >
+          [背景模板]
+        </a>
+      </div>
+
+      {/* 输出根目录 */}
+      <div className="space-y-2 rounded-lg border bg-card p-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <Label className="text-xs font-medium text-foreground">输出根目录</Label>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button type="button" className="inline-flex">
+                    <Info className="h-3 w-3 text-muted-foreground/50 hover:text-muted-foreground transition-colors" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right" className="max-w-xs text-xs leading-relaxed bg-white text-foreground border shadow-md">
+                  固定规格：3:4 竖版 · JPG 100% · 300 DPI · 按 <code className="font-mono">{`{任务名}/{PDF 文件名}/{pdfBaseName}_p{页码三位}.jpg`}</code> 组织
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
           <FilePickerButton
             mode="outputDir"
             label="选择输出目录"
             onPick={(paths) => setDraft({ outputDir: paths[0] })}
           />
         </div>
-        {draft.outputDir ? (
-          <div className="truncate rounded-lg border border-workspace-border/60 bg-slate-50/60 px-3 py-2 text-xs text-workspace-fg-secondary shadow-sm" title={draft.outputDir}>
-            {draft.outputDir}
-          </div>
-        ) : null}
-        <div className="rounded-lg bg-workspace-accent-light px-3 py-2 text-xs text-workspace-fg-secondary">
-          固定规格：3:4 竖版 · JPG 质量 100% · 目标 300 DPI ·
-          按 <code className="font-mono">{`{任务名}/{PDF 文件名}/{pdfBaseName}_p{页码三位}.jpg`}</code> 组织
-        </div>
+          {draft.outputDir ? (
+            <span className="mt-2 flex items-center gap-2 truncate rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground font-mono">
+              <FolderOpen className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
+              {draft.outputDir}
+            </span>
+          ) : (
+            <span className="mt-2 flex items-center gap-1.5 text-xs text-destructive">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              尚未选择输出目录
+            </span>
+          )}
       </div>
 
-      <div className="flex items-center justify-between gap-3 border-t border-workspace-border/60 pt-4">
-        <span
-          className={
-            "text-xs " +
-            (validation.ok ? "text-workspace-muted" : "text-workspace-danger")
-          }
-        >
-          {validation.message || "配置已就绪"}
-        </span>
-        <button
-          type="button"
-          onClick={handleAddToQueue}
-          disabled={!validation.ok}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-indigo-600 to-indigo-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:from-indigo-700 hover:to-indigo-600 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4">
-            <path d="M10.75 4.75a.75.75 0 00-1.5 0v4.5h-4.5a.75.75 0 000 1.5h4.5v4.5a.75.75 0 001.5 0v-4.5h4.5a.75.75 0 000-1.5h-4.5v-4.5z" />
-          </svg>
+      {/* 底部操作栏 */}
+      <div className="flex justify-end border-t pt-4">
+        <Button onClick={handleAddToQueue} disabled={!validationOk} size="sm">
+          <Plus className="h-4 w-4" />
           加入队列
-        </button>
+        </Button>
       </div>
 
       {showCalibrationAlert && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-2xl bg-workspace-surface p-6 shadow-2xl">
+          <div className="w-full max-w-sm rounded-2xl bg-card p-6 shadow-2xl">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-amber-100 text-amber-600">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5">
-                  <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                </svg>
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-destructive/10 text-destructive">
+                <AlertTriangle className="h-5 w-5" />
               </div>
-              <h3 className="text-base font-semibold text-workspace-fg">背景模板未标定</h3>
+              <h3 className="text-base font-semibold">背景模板未标定</h3>
             </div>
-            <p className="mt-3 text-sm leading-relaxed text-workspace-fg-secondary">
+            <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
               背景模板库为空或未标定，请先上传并标定背景模板。
             </p>
             <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCalibrationAlert(false)}
-                className="rounded-lg border border-workspace-border bg-white px-4 py-2 text-xs font-medium text-workspace-fg-secondary transition hover:bg-slate-50"
-              >
+              <Button variant="outline" size="sm" onClick={() => setShowCalibrationAlert(false)}>
                 取消
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowCalibrationAlert(false);
-                  navigate("/backgrounds");
-                }}
-                className="rounded-lg bg-workspace-accent px-4 py-2 text-xs font-medium text-white transition hover:bg-indigo-700"
-              >
+              </Button>
+              <Button size="sm" onClick={() => { setShowCalibrationAlert(false); navigate("/backgrounds"); }}>
                 去上传
-              </button>
+              </Button>
             </div>
           </div>
         </div>

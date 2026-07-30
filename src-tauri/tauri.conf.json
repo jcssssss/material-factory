@@ -50,6 +50,14 @@
     ],
     "category": "Utility",
     "shortDescription": "桌面批量 PDF 转小红书素材",
-    "longDescription": "完全本地执行的桌面应用，按任务批量处理 PDF 并导出 3:4 竖版、300 DPI、JPG 质量 100% 的小红书素材图片。"
+    "longDescription": "完全本地执行的桌面应用，按任务批量处理 PDF 并导出 3:4 竖版、300 DPI、JPG 质量 100% 的小红书素材图片。",
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    },
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
   }
 }

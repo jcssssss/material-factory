@@ -29,10 +29,10 @@ class HeaderFooterDetector:
     - 文本长度   (10%): 页眉页脚通常较短
     """
 
-    # 页眉区域：页面高度 0%-15%
-    HEADER_RATIO_MAX = 0.15
-    # 页脚区域：页面高度 85%-100%
-    FOOTER_RATIO_MIN = 0.85
+    # 页眉区域：页面高度 0%-18%（从15%放宽到18%以覆盖更多边界情况）
+    HEADER_RATIO_MAX = 0.18
+    # 页脚区域：页面高度 82%-100%（从85%放宽到82%）
+    FOOTER_RATIO_MIN = 0.82
 
     def detect(self, doc: fitz.Document) -> List[DetectionResult]:
         """检测 PDF 中的页眉页脚候选。
@@ -71,8 +71,8 @@ class HeaderFooterDetector:
         Returns:
             检测结果列表。
         """
-        # 收集指定区域的文本块: {text -> [(page_num, bbox, size, text)]}
-        region_texts: Dict[str, List[Tuple[int, fitz.Rect, float, str]]] = (
+        # 收集指定区域的文本块: {text -> [(page_num, bbox, size, text, origin)]}
+        region_texts: Dict[str, List[Tuple[int, fitz.Rect, float, str, tuple]]] = (
             defaultdict(list)
         )
 
@@ -93,6 +93,7 @@ class HeaderFooterDetector:
 
                         bbox = span.get("bbox", (0, 0, 0, 0))
                         size = span.get("size", 12)
+                        origin = span.get("origin", (0.0, 0.0))
 
                         # 根据区域类型筛选
                         bbox_top_ratio = bbox[1] / page_h if page_h > 0 else 0
@@ -103,22 +104,34 @@ class HeaderFooterDetector:
                             continue
 
                         region_texts[text].append(
-                            (page_num, fitz.Rect(bbox), size, text)
+                            (page_num, fitz.Rect(bbox), size, text, origin)
                         )
 
         # 评分并输出
         results: List[DetectionResult] = []
 
         for text, occurrences in region_texts.items():
+            # 只上报跨页重复的文本（单页的不可能是页眉页脚）
+            pages_appeared = len({occ[0] for occ in occurrences})
+            if pages_appeared < 2:
+                continue
+
             score, metadata = self._score_region_group(
-                text, occurrences, total_pages, region, doc
+                text, [(p, b, s, t) for p, b, s, t, _ in occurrences],
+                total_pages, region, doc
             )
 
-            if score < 50.0:  # 页眉页脚阈值可以低一些
+            # 阈值降至 0，全部作为候选上报；保留 confidence 供排序
+            if score < 0.0:
                 continue
 
             confidence = score / 100.0
-            first_page, first_bbox, _, _ = occurrences[0]
+            first_page, first_bbox, first_size, _, first_origin = occurrences[0]
+
+            # origin 供 Cleaner 使用（优先使用 span origin）
+            origin = first_origin if first_origin and first_origin != (0.0, 0.0) else (first_bbox.x0, first_bbox.y0)
+            metadata["origin"] = (float(origin[0]), float(origin[1]))
+            metadata["font_size"] = first_size
 
             results.append(
                 DetectionResult(

@@ -26,6 +26,7 @@ from .annotation_cleaner import AnnotationCleaner
 from .artifact_cleaner import ArtifactCleaner
 from .image_cleaner import ImageCleaner
 from .text_cleaner import TextWatermarkCleaner
+from .header_footer_cleaner import HeaderFooterCleaner
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class PDFCleaner:
         self._artifact_cleaner = ArtifactCleaner()
         self._image_cleaner = ImageCleaner()
         self._text_cleaner = TextWatermarkCleaner()
+        self._header_footer_cleaner = HeaderFooterCleaner()
 
     def clean(
         self,
@@ -164,6 +166,8 @@ class PDFCleaner:
             ActionType.REMOVE_ARTIFACT.value,
             ActionType.REMOVE_IMAGE.value,
             ActionType.REMOVE_TEXT.value,
+            ActionType.REMOVE_HEADER.value,
+            ActionType.REMOVE_FOOTER.value,
         ):
             return CleaningResult(
                 action=action,
@@ -182,6 +186,11 @@ class PDFCleaner:
                 return self._image_cleaner.clean(doc, action)
             elif action.action_type == ActionType.REMOVE_TEXT.value:
                 return self._text_cleaner.clean(doc, action)
+            elif action.action_type in (
+                ActionType.REMOVE_HEADER.value,
+                ActionType.REMOVE_FOOTER.value,
+            ):
+                return self._header_footer_cleaner.clean(doc, action)
         except Exception as e:
             logger.error("Action execution failed: %s", e)
             return CleaningResult(

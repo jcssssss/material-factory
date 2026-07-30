@@ -2,6 +2,9 @@ import { useMemo } from "react";
 import { useTaskStore } from "../../store/useTaskStore";
 import type { PageRuleMode } from "../../types/task";
 import { validateFirstN, validateCustomPagesFormat } from "../../lib/pageRule";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import { cn } from "@/lib/utils";
 
 export function PageRuleInput() {
   const draft = useTaskStore((s) => s.draft);
@@ -45,10 +48,10 @@ export function PageRuleInput() {
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2">
+      <Label className="text-xs font-medium text-muted-foreground">页码规则</Label>
       <div className="flex items-center gap-2">
-        <span className="text-xs font-medium text-workspace-fg-secondary">页码规则</span>
-        <div className="flex rounded-lg border border-workspace-border/60 bg-white p-0.5 text-xs shadow-sm">
+        <div className="flex rounded-lg border bg-background p-0.5 text-xs shadow-sm">
           {(
             [
               { key: "firstN", label: "前 N 页" },
@@ -60,12 +63,12 @@ export function PageRuleInput() {
               key={opt.key}
               type="button"
               onClick={() => setMode(opt.key)}
-              className={
-                "rounded-md px-2.5 py-1 font-medium transition-all " +
-                (mode === opt.key
-                  ? "bg-workspace-accent text-white shadow-sm"
-                  : "text-workspace-fg-secondary hover:text-workspace-fg")
-              }
+              className={cn(
+                "rounded-md px-2.5 py-1 font-medium transition-all",
+                mode === opt.key
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              )}
             >
               {opt.label}
             </button>
@@ -74,63 +77,40 @@ export function PageRuleInput() {
       </div>
 
       {(mode === "firstN" || mode === "combined") && (
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="flex items-center gap-2">
-            <span className="text-xs font-medium text-workspace-fg-secondary">前 N 页</span>
-            {firstNFeedback ? (
-              <span className="text-xs text-workspace-danger">
-                {firstNFeedback}
-              </span>
-            ) : null}
-          </span>
-          <input
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">前 N 页</span>
+          <Input
             type="number"
             min={1}
             inputMode="numeric"
-            placeholder="例如：5"
+            placeholder="2"
             value={firstNValue}
             onChange={(e) => handleFirstNChange(e.target.value)}
-            className={
-              "w-32 rounded-lg border bg-white px-2 py-2 text-sm transition focus:outline-none " +
-              (firstNFeedback
-                ? "border-workspace-danger focus:border-workspace-danger focus:ring-2 focus:ring-workspace-danger/10"
-                : "border-workspace-border focus:border-workspace-accent focus:ring-2 focus:ring-workspace-accent/10")
-            }
+            className={cn("w-20 h-8", firstNFeedback && "border-destructive")}
           />
-        </label>
+          {firstNFeedback ? (
+            <span className="text-xs text-destructive">{firstNFeedback}</span>
+          ) : null}
+        </div>
       )}
 
       {(mode === "custom" || mode === "combined") && (
-        <label className="flex flex-col gap-1 text-sm">
-          <span className="flex items-center gap-2">
-            <span className="text-xs font-medium text-workspace-fg-secondary">自定义页码</span>
-            <span className="text-xs text-workspace-muted">
-              支持单页与范围，例如：1,3,5-8
-            </span>
-            {customFeedback ? (
-              <span className="text-xs text-workspace-danger">
-                {customFeedback}
-              </span>
-            ) : null}
-          </span>
-          <input
+        <div className="flex items-center gap-2">
+          <span className="shrink-0 text-xs text-muted-foreground">自定义页码</span>
+          <Input
             type="text"
             placeholder="例如：1,3,5-8"
             value={customValue}
-            onChange={(e) =>
-              setDraft({ customPages: e.target.value })
-            }
-            className={
-              "w-full max-w-md rounded-lg border bg-white px-3 py-2 font-mono text-sm transition focus:outline-none " +
-              (customFeedback
-                ? "border-workspace-danger focus:border-workspace-danger focus:ring-2 focus:ring-workspace-danger/10"
-                : "border-workspace-border focus:border-workspace-accent focus:ring-2 focus:ring-workspace-accent/10")
-            }
+            onChange={(e) => setDraft({ customPages: e.target.value })}
+            className={cn("flex-1 h-8 font-mono", customFeedback && "border-destructive")}
           />
-        </label>
+          {customFeedback ? (
+            <span className="shrink-0 text-xs text-destructive">{customFeedback}</span>
+          ) : null}
+        </div>
       )}
 
-      <div className="rounded-lg bg-workspace-accent-light px-3 py-2 text-xs text-workspace-fg-secondary">
+      <div className="rounded-lg bg-muted/30 px-2.5 py-1.5 text-xs text-muted-foreground leading-snug">
         {mode === "firstN"
           ? "仅按前 N 页导出。"
           : mode === "custom"

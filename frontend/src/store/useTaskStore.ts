@@ -79,10 +79,10 @@ type TaskStoreState = {
   abandonTask: (taskId: string) => void;
 };
 
-function nextId(prefix: string): string {
-  return `${prefix}_${Date.now().toString(36)}_${Math.random()
-    .toString(36)
-    .slice(2, 8)}`;
+function nextId(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export const useTaskStore = create<TaskStoreState>((set, get) => ({
@@ -95,12 +95,14 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
   logsLoaded: false,
   draft: {
     taskName: "",
-    sourceType: "files",
+    sourceType: "folder",
     sourcePaths: [],
     outputDir: "",
     pageRuleMode: "firstN",
-    firstN: undefined,
+    firstN: 2,
     customPages: "",
+    generateMaterialList: true,
+    generatePrintImages: true,
   },
   breakpoints: {},
 
@@ -108,17 +110,13 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     set((s) => ({ draft: { ...s.draft, ...patch } })),
 
   resetDraft: () =>
-    set({
+    set((s) => ({
       draft: {
+        ...s.draft,
         taskName: "",
-        sourceType: "files",
         sourcePaths: [],
-        outputDir: "",
-        pageRuleMode: "firstN",
-        firstN: undefined,
-        customPages: "",
       },
-    }),
+    })),
 
   enqueueTask: (task) => set((s) => ({ queue: [...s.queue, task] })),
 
@@ -172,8 +170,14 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     const task = queue.find((t) => t.taskId === taskId);
     if (!task || !canTransition(task.status, "cancelled")) return;
     currentController.cancel();
-    // 状态更新由 taskRunner 检测到 cancel 后通过 runTask 返回值完成。
-    // 这里不直接设置 cancelled，避免与 taskRunner 的状态更新竞争。
+    // 立即更新队列状态，提供即时反馈。
+    // taskRunner 检测到 cancel 后也会通过 runTask 返回值更新状态，
+    // 但会与这里的值一致，无竞争风险。
+    set((s) => ({
+      queue: s.queue.map((t) =>
+        t.taskId === taskId ? { ...t, status: "cancelled" as TaskStatus } : t
+      ),
+    }));
   },
 
   appendLog: (entry) =>
@@ -260,5 +264,5 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
 
 // 创建新任务时分配稳定 ID 的工具函数。
 export function createTaskId(): string {
-  return nextId("task");
+  return nextId();
 }

@@ -291,7 +291,7 @@ def header_pdf_path() -> Generator[str, None, None]:
 
 @pytest.fixture
 def footer_pdf_path() -> Generator[str, None, None]:
-    """生成带页脚的 PDF（每页底部固定文本）。"""
+    """生成带页脚的 PDF（每页底部固定文本，模拟真实页脚场景）。"""
     fd, path = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
 
@@ -305,8 +305,8 @@ def footer_pdf_path() -> Generator[str, None, None]:
                 f"This is the main body content on page {i+1}.",
                 fontsize=11,
             )
-            # 页脚（底部区域 85-100%）
-            page.insert_text((200, 810), f"- Page {i+1} -", fontsize=9)
+            # 页脚（底部区域 82-100%），每页相同内容
+            page.insert_text((200, 810), "Confidential - Page Footer", fontsize=9)
 
         doc.save(path)
         yield path

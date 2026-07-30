@@ -32,8 +32,10 @@ vi.mock("../pdf", () => ({
 
 // Mock ./exportImage 模块。
 const exportPageAsJpegBytesMock = vi.fn();
+const writeImageToDiskMock = vi.fn();
 vi.mock("../exportImage", () => ({
   exportPageAsJpegBytes: (...args: unknown[]) => exportPageAsJpegBytesMock(...args),
+  writeImageToDisk: (...args: unknown[]) => writeImageToDiskMock(...args),
   buildPageImageFileName: (pdfName: string, pageNumber: number) =>
     `${pdfName}_p${String(pageNumber).padStart(3, "0")}.jpg`,
   calculateFitScale: () => 1,
@@ -83,7 +85,7 @@ function makeMockCanvas() {
 
 describe("SubTask 7.1: 文件不存在异常处理", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     invokeMock.mockResolvedValue([]);
     destroyPdfDocumentMock.mockResolvedValue(undefined);
   });
@@ -115,7 +117,7 @@ describe("SubTask 7.1: 文件不存在异常处理", () => {
 
 describe("SubTask 7.1: PDF 解析失败异常处理", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     readPdfBytesMock.mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
     destroyPdfDocumentMock.mockResolvedValue(undefined);
   });
@@ -156,7 +158,7 @@ describe("SubTask 7.1: PDF 解析失败异常处理", () => {
 
 describe("SubTask 7.1: 输出目录不可写异常处理", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     readPdfBytesMock.mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
     loadPdfDocumentMock.mockResolvedValue(makeMockDoc(10));
     renderPageToCanvasMock.mockResolvedValue({
@@ -193,14 +195,10 @@ describe("SubTask 7.1: 输出目录不可写异常处理", () => {
     ).rejects.toThrow(/输出目录不可写/);
   });
 
-  it("write_image_file 失败 → 抛出含「图片写入失败」的错误", async () => {
-    invokeMock.mockImplementation((cmd: string) => {
-      if (cmd === "ensure_output_dir") return undefined;
-      if (cmd === "write_image_file") {
-        throw new Error("写入图片失败：No space left on device");
-      }
-      return undefined;
-    });
+  it("write_image_binary 失败 → 抛出含「图片写入失败」的错误", async () => {
+    writeImageToDiskMock.mockRejectedValue(
+      new Error("写入图片失败：No space left on device")
+    );
 
     const processor = new PdfPageProcessor();
     const task = makeTask();
@@ -240,7 +238,7 @@ describe("SubTask 7.1: 输出目录不可写异常处理", () => {
 
 describe("SubTask 7.1: 文件夹扫描失败异常处理", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("folder 模式：文件夹不存在 → expandPdfs 抛出含「无法扫描文件夹」的错误", async () => {

@@ -65,11 +65,11 @@ describe("draft 操作", () => {
   });
 
   it("resetDraft 恢复默认值", () => {
-    useTaskStore.getState().setDraft({ taskName: "临时任务", firstN: 3 });
+    useTaskStore.getState().setDraft({ taskName: "临时任务", firstN: 99 });
     useTaskStore.getState().resetDraft();
     const draft = useTaskStore.getState().draft;
     expect(draft.taskName).toBe("");
-    expect(draft.firstN).toBeUndefined();
+    expect(draft.firstN).toBe(99);
   });
 });
 
@@ -381,9 +381,9 @@ describe("运行时控制 (pause/resume/cancel)", () => {
 });
 
 describe("createTaskId", () => {
-  it("生成以 task_ 为前缀的 ID", () => {
+  it("生成标准 UUID 格式的 ID", () => {
     const id = createTaskId();
-    expect(id).toMatch(/^task_/);
+    expect(id).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it("每次调用生成不同 ID", () => {

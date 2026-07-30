@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { HashRouter, matchPath, useLocation } from "react-router-dom";
 import { routes } from "./routes";
 import { useTaskStore } from "./store/useTaskStore";
@@ -9,67 +9,259 @@ import {
 } from "./lib/persistence";
 import type { TaskBreakpoint } from "./lib/persistence";
 import { logger } from "./lib/logger";
+import {
+  LayoutDashboard,
+  History,
+  ScrollText,
+  Image,
+  Droplets,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
-const NAV_ICONS: Record<string, string> = {
-  "/": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M4.25 2A2.25 2.25 0 002 4.25v2.5A2.25 2.25 0 004.25 9h2.5A2.25 2.25 0 009 6.75v-2.5A2.25 2.25 0 006.75 2h-2.5zm0 9A2.25 2.25 0 002 13.25v2.5A2.25 2.25 0 004.25 18h2.5A2.25 2.25 0 009 15.75v-2.5A2.25 2.25 0 006.75 11h-2.5zm9-9A2.25 2.25 0 0011 4.25v2.5A2.25 2.25 0 0013.25 9h2.5A2.25 2.25 0 0018 6.75v-2.5A2.25 2.25 0 0015.75 2h-2.5zm0 9A2.25 2.25 0 0011 13.25v2.5A2.25 2.25 0 0013.25 18h2.5A2.25 2.25 0 0018 15.75v-2.5A2.25 2.25 0 0015.75 11h-2.5z" clip-rule="evenodd"/></svg>`,
-  "/history": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm.75-11.25a.75.75 0 00-1.5 0v2.5h-2.5a.75.75 0 000 1.5h2.5v2.5a.75.75 0 001.5 0v-2.5h2.5a.75.75 0 000-1.5h-2.5v-2.5z" clip-rule="evenodd"/></svg>`,
-  "/logs": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M4.5 2A1.5 1.5 0 003 3.5v13A1.5 1.5 0 004.5 18h11a1.5 1.5 0 001.5-1.5V7.621a1.5 1.5 0 00-.44-1.06l-4.12-4.122A1.5 1.5 0 0011.378 2H4.5zm2.25 8.5a.75.75 0 000 1.5h6.5a.75.75 0 000-1.5h-6.5zm0 3a.75.75 0 000 1.5h6.5a.75.75 0 000-1.5h-6.5z" clip-rule="evenodd"/></svg>`,
-  "/backgrounds": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path d="M13.75 7.5a1.25 1.25 0 100-2.5 1.25 1.25 0 000 2.5z"/><path fill-rule="evenodd" d="M1.5 4.5A2.5 2.5 0 014 2h12a2.5 2.5 0 012.5 2.5v8a2.5 2.5 0 01-2.5 2.5H4a2.5 2.5 0 01-2.5-2.5v-8zM4 3.5a1 1 0 00-1 1v5.19l2.76-2.2a1.25 1.25 0 011.58 0l3.11 2.49 1.1-1.1a1.25 1.25 0 011.77 0l2.68 2.68V4.5a1 1 0 00-1-1H4z" clip-rule="evenodd"/></svg>`,
-  "/watermark": `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M7 3.75A2.75 2.75 0 019.75 1h.5A2.75 2.75 0 0113 3.75v.443c.572.055 1.14.122 1.706.202a.75.75 0 01-.28 1.473c-.046-.009-.092-.017-.138-.025A20.268 20.268 0 0010 5.75c-1.545 0-3.03.166-4.457.478a.75.75 0 11-.414-1.442A41.042 41.042 0 017 4.193V3.75zm0 2.5v.75c0 .69.56 1.25 1.25 1.25h.295l.883.882a2.75 2.75 0 003.888 0l.884-.882H14.5c.69 0 1.25-.56 1.25-1.25v-.75c.607.048 1.21.106 1.81.173a.75.75 0 01.622.863 41.4 41.4 0 01-2.112 12.034.75.75 0 01-.62.59 40.77 40.77 0 01-10.9 0 .75.75 0 01-.62-.59A41.4 41.4 0 012.98 7.17a.75.75 0 01.622-.863c.6-.067 1.203-.125 1.81-.173l.588.414V6.25zm2.5 4.25a.75.75 0 000 1.5h1a.75.75 0 000-1.5h-1z" clip-rule="evenodd"/></svg>`,
+const NAV_ICONS: Record<string, ReactNode> = {
+  "/": <LayoutDashboard className="h-5 w-5" />,
+  "/history": <History className="h-5 w-5" />,
+  "/logs": <ScrollText className="h-5 w-5" />,
+  "/backgrounds": <Image className="h-5 w-5" />,
+  "/watermark-removal": <Droplets className="h-5 w-5" />,
 };
+
+function CollapsibleText({ show, children }: { show: boolean; children: ReactNode }) {
+  return (
+    <span
+      className={cn(
+        "overflow-hidden whitespace-nowrap transition-all duration-300 ease-in-out",
+        show ? "w-28 opacity-100" : "w-0 opacity-0"
+      )}
+    >
+      {children}
+    </span>
+  );
+}
+
+function NavItem({ path, label, icon, active, disabled, collapsed }: {
+  path: string;
+  label: string;
+  icon: ReactNode;
+  active: boolean;
+  disabled?: boolean;
+  collapsed?: boolean;
+}) {
+  const content = (
+    <div
+      className={cn(
+        "flex items-center rounded-lg py-2 text-sm transition-all duration-150",
+        collapsed ? "justify-center px-0 gap-0" : "px-3 gap-2.5",
+        disabled && "text-white/20",
+        !disabled && active && "bg-primary/10 font-medium text-primary",
+        !disabled && !active && "text-white/50 hover:bg-workspace-sidebar-hover hover:text-white"
+      )}
+    >
+      {!disabled && active && (
+        <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-primary" />
+      )}
+      <span
+        className={cn(
+          "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-all duration-150",
+          !disabled && active && "bg-primary text-primary-foreground shadow-sm"
+        )}
+      >
+        {icon}
+      </span>
+      <div className={cn("flex items-center gap-1.5", collapsed ? "hidden" : "min-w-0 flex-1")}>
+        <CollapsibleText show={!collapsed}>
+          <span>{label}</span>
+        </CollapsibleText>
+        {disabled && (
+          <span
+            className={cn(
+              "shrink-0 rounded bg-white/10 px-1.5 py-0.5 text-[10px] font-medium text-white/40 transition-all duration-300",
+              collapsed && "w-0 scale-0 opacity-0"
+            )}
+          >
+            开发中
+          </span>
+        )}
+      </div>
+      {disabled && collapsed && (
+        <span className="absolute -top-0.5 -right-0.5 flex h-3 w-3 items-center justify-center">
+          <span className="h-1.5 w-1.5 rounded-full bg-white/20" />
+        </span>
+      )}
+    </div>
+  );
+
+  if (disabled) {
+    const el = <div className="group relative">{content}</div>;
+    if (collapsed) {
+      return (
+        <Tooltip delayDuration={300}>
+          <TooltipTrigger asChild>{el}</TooltipTrigger>
+          <TooltipContent side="right" className="flex items-center gap-1.5 bg-white text-foreground shadow-md border">
+            <span>{label}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">开发中</span>
+          </TooltipContent>
+        </Tooltip>
+      );
+    }
+    return el;
+  }
+
+  if (collapsed) {
+    return (
+      <Tooltip delayDuration={300}>
+        <TooltipTrigger asChild>
+          <a href={`#${path}`} className="group relative block">
+            {content}
+          </a>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="flex items-center gap-1.5 bg-white text-foreground shadow-md border">
+          <span>{label}</span>
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <a href={`#${path}`} className="group relative block">
+      {content}
+    </a>
+  );
+}
 
 function AppShell() {
   const location = useLocation();
   const activeRoute = routes.find((r) => matchPath(r.path, location.pathname));
   const Route = activeRoute?.element;
+  const navRoutes = routes.filter((r) => !r.path.startsWith("/calibrate"));
+  const mainRoutes = navRoutes.filter((r) => !r.disabled);
+  const disabledRoutes = navRoutes.filter((r) => r.disabled);
+  const [collapsed, setCollapsed] = useState(false);
+
   return (
-    <div className="flex h-screen bg-workspace-bg text-workspace-fg">
-      <aside className="flex w-14 shrink-0 flex-col items-center gap-1 border-r border-workspace-border/60 bg-workspace-sidebar pt-5 shadow-sidebar">
-        <div className="mb-3 flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-fuchsia-500 text-[10px] font-bold leading-none text-white">
-          M
-        </div>
-        <div className="flex flex-col items-center gap-1">
-          {routes.filter((r) => !r.path.startsWith("/calibrate")).map((r) => {
-            const active = !!matchPath(r.path, location.pathname);
-            return (
-              <a
-                key={r.path}
-                href={`#${r.path}`}
-                className={
-                  "flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-150 " +
-                  (active
-                    ? "bg-workspace-accent text-white shadow-lg shadow-indigo-500/20"
-                    : "text-workspace-muted/60 hover:bg-workspace-sidebar-hover hover:text-white")
-                }
-                dangerouslySetInnerHTML={{ __html: NAV_ICONS[r.path] }}
-                title={r.label}
-              />
-            );
-          })}
-        </div>
-      </aside>
-      <main className="flex flex-1 flex-col overflow-hidden">
-        <header className="flex h-12 shrink-0 items-center justify-between border-b border-workspace-border/60 bg-workspace-surface/80 px-6 backdrop-blur-sm">
-          <div className="flex items-center gap-3">
-            <h1 className="text-sm font-semibold text-workspace-fg">
+    <TooltipProvider>
+      <div className="flex h-screen bg-background text-foreground">
+        <aside
+          className={cn(
+            "flex shrink-0 flex-col border-r bg-workspace-sidebar shadow-sidebar transition-all duration-300 ease-in-out overflow-hidden",
+            collapsed ? "w-16" : "w-52"
+          )}
+        >
+          {/* Logo */}
+          <div className={cn("flex items-center pt-5 pb-4 border-b border-border/40", collapsed ? "justify-center px-0 gap-0" : "px-5 gap-2.5")}>
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl shadow-sm">
+              <img src="/icon64.png" alt="" className="h-full w-full object-cover" />
+            </div>
+            {!collapsed && (
+              <span className="text-sm font-extrabold leading-none text-white">素材工厂</span>
+            )}
+          </div>
+
+          {/* 导航 */}
+          <nav className={cn("flex-1 space-y-0.5", collapsed ? "px-0" : "px-3")}>
+            <div
+              className={cn(
+                "overflow-hidden transition-all duration-300 ease-in-out",
+                collapsed ? "max-h-0 opacity-0" : "max-h-5 mb-2 opacity-100"
+              )}
+            >
+              <span className="inline-block px-3 text-[10px] font-medium uppercase tracking-wider text-white/40">
+                功能
+              </span>
+            </div>
+
+            {mainRoutes.map((r) => {
+              const active = !!matchPath(r.path, location.pathname);
+              return (
+                <NavItem
+                  key={r.path}
+                  path={r.path}
+                  label={r.label}
+                  icon={NAV_ICONS[r.path]}
+                  active={active}
+                  collapsed={collapsed}
+                />
+              );
+            })}
+
+            {disabledRoutes.length > 0 && (
+              <>
+                <Separator className={cn("my-3 bg-white/10", collapsed ? "mx-0" : "mx-3")} />
+                {disabledRoutes.map((r) => (
+                  <NavItem
+                    key={r.path}
+                    path={r.path}
+                    label={r.label}
+                    icon={NAV_ICONS[r.path]}
+                    active={false}
+                    disabled
+                    collapsed={collapsed}
+                  />
+                ))}
+              </>
+            )}
+          </nav>
+
+          {/* 底部 */}
+          <div className="flex flex-col items-center border-t border-white/10">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setCollapsed((c) => !c)}
+              className={cn(
+                "w-full text-white/40 hover:text-white/80 hover:bg-workspace-sidebar-hover",
+                collapsed ? "px-0" : "justify-start gap-2 px-4"
+              )}
+            >
+              {collapsed ? (
+                <ChevronRight className="h-4 w-4 mx-auto" />
+              ) : (
+                <>
+                  <ChevronLeft className="h-4 w-4 shrink-0" />
+                  <CollapsibleText show={true}>
+                    <span className="text-[11px]">收起菜单</span>
+                  </CollapsibleText>
+                </>
+              )}
+            </Button>
+
+            <div
+              className={cn(
+                "overflow-hidden transition-all duration-300 ease-in-out",
+                collapsed ? "max-h-0 py-0" : "max-h-6 pb-3"
+              )}
+            >
+              <span className="block text-center text-[11px] text-white/30">v1.1</span>
+            </div>
+          </div>
+        </aside>
+
+        <main className="flex flex-1 flex-col overflow-hidden">
+          <header className="flex h-12 shrink-0 items-center border-b bg-card/80 px-6 backdrop-blur-sm">
+            <h1 className="text-sm font-semibold">
               {activeRoute?.label ?? ""}
             </h1>
+          </header>
+          <div className="flex-1 overflow-auto">
+            {Route ?? (
+              <div className="flex h-full items-center justify-center text-muted-foreground">
+                页面不存在
+              </div>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            <span className="rounded-md bg-workspace-accent-light px-2 py-0.5 text-[11px] font-medium text-workspace-accent">
-              v1.1
-            </span>
-          </div>
-        </header>
-        <div className="flex-1 overflow-auto">
-          {Route ?? (
-            <div className="flex h-full items-center justify-center text-workspace-muted">
-              页面不存在
-            </div>
-          )}
-        </div>
-      </main>
-    </div>
+        </main>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -114,9 +306,9 @@ export default function App() {
 
   if (!ready) {
     return (
-      <div className="flex h-screen items-center justify-center bg-workspace-bg text-workspace-muted">
+      <div className="flex h-screen items-center justify-center bg-background text-muted-foreground">
         <div className="flex items-center gap-3">
-          <span className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           <span className="text-sm">加载中…</span>
         </div>
       </div>

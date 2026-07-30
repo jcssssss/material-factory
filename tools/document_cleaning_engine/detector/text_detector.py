@@ -1,12 +1,18 @@
 """文本水印检测模块。
 
-检测 PDF 中的文本型水印候选（如"机密"、"内部资料"等跨页重复文本）。
-使用评分模型评估文本成为水印候选的概率。
+检测 PDF 中的文本型水印候选。
+使用纯结构特征评分，不依赖关键词匹配：
+
+评分维度（100 分制）:
+- 跨页重复 (50%): 相同文本在多页按固定位置重复出现（水印最强信号）
+- 位置一致性 (25%): 文本在每页的坐标波动极小（水印是固定位置的）
+- 视觉异常 (25%): 字体大小、旋转角度、透明度、边距位置
 """
 
 from __future__ import annotations
 
 import math
+import statistics
 from collections import defaultdict
 from typing import Dict, List, Tuple
 
@@ -18,27 +24,16 @@ from . import DetectionResult
 class TextDetector:
     """文本水印检测器。
 
-    评分维度（100 分制）:
-    - 关键词匹配 (30%): 文本是否匹配水印关键词库
-    - 位置评分   (25%): 文本是否位于高风险区域（中央/斜向/边缘）
-    - 跨页重复   (30%): 相同文本在多页出现
-    - 样式评分   (15%): 字体大小、旋转角度、透明效果
+    核心思路：水印的本质是"在所有页面以固定形式重复出现的非正文内容"。
+    不关心文字内容是什么，只分析结构特征。
     """
 
-    # 置信度阈值：>= 0.8 为候选水印
-    CONFIDENCE_THRESHOLD = 0.8
+    # 置信度阈值：上报所有跨页重复文本候选（0 = 全部上报）
+    # 评分仍用于排序和 risk_score，但不再丢弃候选
+    CONFIDENCE_THRESHOLD = 0.0
 
-    # 初始水印关键词库
-    KEYWORDS: List[str] = [
-        "机密",
-        "内部资料",
-        "Confidential",
-        "Draft",
-        "Sample",
-        "版权所有",
-        "Copyright",
-        "禁止传播",
-    ]
+    # 跨页重复率下限：只在 >=2 页出现的文本才上报（单页文本不可能是水印）
+    MIN_PAGES_FOR_CANDIDATE = 2
 
     def detect(self, doc: fitz.Document) -> List[DetectionResult]:
         """检测 PDF 中的文本水印候选。
@@ -53,6 +48,9 @@ class TextDetector:
         if total_pages == 0:
             return []
 
+        page_width = doc[0].rect.width if total_pages > 0 else 595.0
+        page_height = doc[0].rect.height if total_pages > 0 else 842.0
+
         # 收集所有文本块: {text_content -> [(page_num, span_info)]}
         text_groups: Dict[str, List[Tuple[int, dict]]] = defaultdict(list)
 
@@ -61,7 +59,7 @@ class TextDetector:
             blocks = page.get_text("dict").get("blocks", [])
 
             for block in blocks:
-                if block.get("type") != 0:  # 0 = text block
+                if block.get("type") != 0:
                     continue
 
                 for line in block.get("lines", []):
@@ -81,26 +79,28 @@ class TextDetector:
                         }
                         text_groups[text].append((page_num, span_info))
 
-        # 对各组文本进行评分
+        # 评分并输出
         results: List[DetectionResult] = []
-        page_width = doc[0].rect.width if total_pages > 0 else 595.0
-        page_height = doc[0].rect.height if total_pages > 0 else 842.0
 
         for text, occurrences in text_groups.items():
+            # 只上报跨页重复的文本（单页 unique 内容不上报）
+            pages_appeared = len({occ[0] for occ in occurrences})
+            if pages_appeared < self.MIN_PAGES_FOR_CANDIDATE:
+                continue
+
             score, metadata = self._score_text_group(
                 text, occurrences, total_pages, page_width, page_height
             )
 
             confidence = score / 100.0
+            # 阈值已为 0，不再过滤；保留 confidence 供排序和 risk_score
             if confidence < self.CONFIDENCE_THRESHOLD:
                 continue
 
-            # 取首次出现的页面
             first_page, first_span = occurrences[0]
             bbox = first_span["bbox"]
             origin = first_span.get("origin", (0.0, 0.0))
 
-            # 在 metadata 中加入 origin 供 Cleaner 使用
             metadata["origin"] = (float(origin[0]), float(origin[1]))
             metadata["font_size"] = first_span.get("size", 0)
 
@@ -125,7 +125,7 @@ class TextDetector:
         page_width: float,
         page_height: float,
     ) -> Tuple[float, Dict[str, object]]:
-        """对一组重复文本进行综合评分（100 分制）。
+        """对一组重复文本进行结构评分（100 分制）。
 
         Args:
             text: 文本内容。
@@ -137,169 +137,182 @@ class TextDetector:
         Returns:
             (score, metadata): 综合评分和详细信息。
         """
-        # 关键词匹配评分 (30%)
-        keyword_score = self._score_keywords(text)
-
-        # 位置评分 (25%)
-        position_score = self._score_position(occurrences, page_width, page_height)
-
-        # 跨页重复评分 (30%)
+        # 跨页重复 (50%)
         repetition_score = self._score_repetition(occurrences, total_pages)
 
-        # 样式评分 (15%)
-        style_score = self._score_style(occurrences)
+        # 位置一致性 (25%) — 水印在每页的(x,y)几乎不变
+        consistency_score = self._score_position_consistency(occurrences, page_width, page_height)
 
-        total_score = (
-            keyword_score + position_score + repetition_score + style_score
-        )
+        # 视觉异常 (25%)
+        visual_score = self._score_visual_anomaly(occurrences, page_width, page_height)
+
+        total_score = repetition_score + consistency_score + visual_score
 
         pages_appeared = len({occ[0] for occ in occurrences})
         metadata: Dict[str, object] = {
             "text": text,
             "pages_appeared": pages_appeared,
             "total_pages": total_pages,
-            "keyword_score": round(keyword_score, 1),
-            "position_score": round(position_score, 1),
+            "repeat_rate": round(pages_appeared / max(total_pages, 1), 4),
             "repetition_score": round(repetition_score, 1),
-            "style_score": round(style_score, 1),
+            "consistency_score": round(consistency_score, 1),
+            "visual_score": round(visual_score, 1),
             "total_score": round(total_score, 1),
         }
 
         return total_score, metadata
 
-    def _score_keywords(self, text: str) -> float:
-        """关键词匹配评分（满分 30）。
-
-        匹配水印词库中的关键词，匹配越多得分越高。
-        """
-        matched = 0
-        for keyword in self.KEYWORDS:
-            if keyword.lower() in text.lower():
-                matched += 1
-
-        if matched >= 3:
-            return 30.0
-        elif matched == 2:
-            return 28.0
-        elif matched == 1:
-            return 25.0
-        return 0.0
-
-    def _score_position(
-        self,
-        occurrences: List[Tuple[int, dict]],
-        page_width: float,
-        page_height: float,
-    ) -> float:
-        """位置评分（满分 25）。
-
-        水印常见位置：页面中央、斜向区域、边缘区域。
-        按距页面中心的距离连续评分，而非离散判定。
-        """
-        scores: List[float] = []
-
-        for _, span in occurrences:
-            origin = span.get("origin", (0, 0))
-            ox, oy = origin[0] / page_width, origin[1] / page_height
-
-            dx = abs(ox - 0.5)
-            dy = abs(oy - 0.5)
-            dist = (dx**2 + dy**2) ** 0.5
-
-            # 中央区域 (dist < 0.35): 高分
-            # 边缘区域 (dist > 0.40): 中低分
-            # 斜向区域加分
-            is_diagonal = (
-                abs(dx - dy) < 0.1 and dist > 0.2
-            )
-
-            if dist < 0.15:
-                s = 25.0  # 正中央
-            elif dist < 0.25:
-                s = 22.0  # 近中央
-            elif dist < 0.35:
-                s = 18.0  # 中央附近
-            elif dist < 0.45:
-                s = 12.0  # 中等偏移
-            else:
-                s = 8.0   # 边缘
-
-            # 斜向区域加分（水印常见斜向摆放）
-            if is_diagonal:
-                s = min(25.0, s + 3.0)
-
-            scores.append(s)
-
-        return max(scores) if scores else 0.0
-
+    @staticmethod
     def _score_repetition(
-        self,
         occurrences: List[Tuple[int, dict]],
         total_pages: int,
     ) -> float:
-        """跨页重复评分（满分 30）。
+        """跨页重复评分（满分 50）。
 
-        相同文本出现在越多页面，得分越高。
+        水印最核心的特征：在所有页面以相同形式重复出现。
+        正文文本通常只出现 1-2 次，水印出现 >= 80% 页面。
         """
         if total_pages <= 1:
             return 0.0
 
         pages_appeared = len({occ[0] for occ in occurrences})
         ratio = pages_appeared / total_pages
-        return 30.0 * ratio
 
-    def _score_style(
-        self,
+        if ratio >= 1.0:
+            return 50.0  # 每页都有
+        elif ratio >= 0.8:
+            return 45.0
+        elif ratio >= 0.6:
+            return 35.0
+        elif ratio >= 0.4:
+            return 25.0
+        elif ratio >= 0.2:
+            return 15.0
+        return 0.0  # 只出现几次，不是水印
+
+    @staticmethod
+    def _score_position_consistency(
         occurrences: List[Tuple[int, dict]],
+        page_width: float,
+        page_height: float,
     ) -> float:
-        """样式评分（满分 15）。
+        """位置一致性评分（满分 25）。
 
-        水印通常有特殊的样式特征：
-        - 字体大小异常（过大或过小）
-        - 存在旋转角度
-        - 透明/半透明效果（alpha < 255）
+        水印在每页的精确位置几乎不变。
+        正文文本在不同页面的位置会因内容长度、图表等产生偏移。
+
+        计算所有出现位置的标准差，标准差越小 = 位置越固定 = 越可能是水印。
         """
-        scores: List[float] = []
+        if len(occurrences) < 2:
+            return 5.0  # 只出现一次，无法判断一致性，低分
+
+        x_positions = []
+        y_positions = []
+
+        for _, span in occurrences:
+            origin = span.get("origin", (0, 0))
+            x_positions.append(origin[0] / page_width)
+            y_positions.append(origin[1] / page_height)
+
+        # 计算标准差（归一化到 [0,1] 空间）
+        x_std = statistics.stdev(x_positions) if len(x_positions) > 1 else 0
+        y_std = statistics.stdev(y_positions) if len(y_positions) > 1 else 0
+
+        # 综合位置偏差
+        pos_deviation = (x_std**2 + y_std**2) ** 0.5
+
+        # 偏差越小分越高
+        if pos_deviation < 0.01:
+            return 25.0  # 位置几乎完全固定
+        elif pos_deviation < 0.03:
+            return 22.0  # 非常稳定
+        elif pos_deviation < 0.05:
+            return 18.0  # 较稳定
+        elif pos_deviation < 0.10:
+            return 12.0  # 有一定偏移
+        elif pos_deviation < 0.20:
+            return 6.0   # 偏移较大
+        return 2.0  # 位置随机，不是水印
+
+    @staticmethod
+    def _score_visual_anomaly(
+        occurrences: List[Tuple[int, dict]],
+        page_width: float,
+        page_height: float,
+    ) -> float:
+        """视觉异常评分（满分 25）。
+
+        水印在视觉上通常与正文不同：
+        - 字体过大/过小
+        - 有旋转角度（斜向水印）
+        - 半透明
+        - 位于页面四周边距
+        - 覆盖正文区域（跨行/跨列）
+        """
+        scores: list[float] = []
 
         for _, span in occurrences:
             s = 0.0
             size = span.get("size", 12)
-
-            # 字体大小异常 (超过 30pt 或小于 6pt 通常不正常)
-            if size > 40:
-                s += 7.0  # 超大字体，水印特征明显
-            elif size > 20:
-                s += 5.0  # 大字体，可疑
-            elif size < 6:
-                s += 3.0
-            else:
-                s += 2.0
-
-            # 旋转角度检测
+            origin = span.get("origin", (0, 0))
+            bbox = span.get("bbox", (0, 0, 0, 0))
             line_dir = span.get("line_dir", (1.0, 0.0))
+
+            # ── 字体大小异常 (0-10) ──
+            if size > 40:
+                s += 10.0  # 超大字体，特征明显
+            elif size > 20:
+                s += 8.0  # 大字体
+            elif size > 14:
+                s += 5.0  # 偏大
+            elif size < 6:
+                s += 6.0  # 极小字体（页眉页脚常见）
+            elif 6 <= size <= 8:
+                s += 4.0  # 偏小
+            else:
+                s += 1.0  # 正常字号（9-14pt），低可疑
+
+            # ── 旋转检测 (0-6) ──
             is_rotated = (
                 abs(line_dir[0]) > 0.01 and abs(line_dir[1]) > 0.01
             )
             if is_rotated:
-                # 检查是否为 90° 旋转（垂直文本）
                 if abs(line_dir[0]) < 0.1:
-                    s += 7.0  # 垂直文本，常见于水印
+                    s += 6.0  # 垂直文本
                 else:
-                    # 斜向水印（如 45° 旋转）
                     angle = math.degrees(
                         math.atan2(line_dir[1], line_dir[0])
                     )
                     if 20 <= abs(angle) <= 70:
-                        s += 9.0  # 斜向水印，高分
+                        s += 6.0  # 斜向水印
                     else:
-                        s += 5.0  # 其他旋转
-            else:
-                s += 1.0  # 水平文本，低分
+                        s += 3.0
 
-            # 透明度检测
+            # ── 透明度 (0-4) ──
             alpha = span.get("alpha", 255)
             if alpha < 255:
-                s += 3.0  # 有透明度
+                s += 4.0
+
+            # ── 边距位置 (0-5) ──
+            ox = origin[0] / page_width
+            oy = origin[1] / page_height
+            margin_left = ox < 0.08
+            margin_right = ox > 0.92
+            margin_top = oy < 0.10
+            margin_bottom = oy > 0.85
+
+            if margin_top or margin_bottom:
+                s += 5.0  # 页眉页脚区域
+            elif margin_left or margin_right:
+                s += 3.0  # 左右边距
+
+            # ── 跨行/超大覆盖 (0-额外) ──
+            span_w = bbox[2] - bbox[0]
+            span_h = bbox[3] - bbox[1]
+            if span_w > page_width * 0.6:
+                s += 2.0  # 水平跨度大
+            if span_h > page_height * 0.3:
+                s += 3.0  # 垂直覆盖大段区域
 
             scores.append(s)
 

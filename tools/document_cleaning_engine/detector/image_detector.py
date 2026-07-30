@@ -25,8 +25,8 @@ class ImageDetector:
     - 透明度   (15%): 图片是否包含 Alpha 通道
     """
 
-    # 置信度阈值：>= 0.8 为候选水印
-    CONFIDENCE_THRESHOLD = 0.8
+    # 置信度阈值：0 = 所有跨页重复图片全部上报
+    CONFIDENCE_THRESHOLD = 0.0
 
     def detect(self, doc: fitz.Document) -> List[DetectionResult]:
         """检测 PDF 中的重复图片水印候选。

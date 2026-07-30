@@ -21,6 +21,7 @@ mod background;
 mod db;
 mod warp;
 mod watermark;
+mod python_bridge;
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -82,6 +83,14 @@ pub fn run() {
             watermark::detect_watermark_info,
             watermark::remove_watermarks,
             watermark::batch_remove_watermarks,
+            watermark::scan_document,
+            watermark::scan_documents,
+            watermark::execute_clean,
+            watermark::execute_batch_clean,
+            watermark::generate_clean_report,
+            python_bridge::python_detect,
+            python_bridge::python_clean,
+            python_bridge::python_validate,
             copy_file,
         ])
         .run(tauri::generate_context!())

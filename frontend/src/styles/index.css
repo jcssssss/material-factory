@@ -5,6 +5,22 @@
 @layer base {
   :root {
     color-scheme: light;
+    --background: 210 40% 96.1%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --primary: 243 75% 59%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 93%;
+    --muted-foreground: 215.4 16.3% 35%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 20% 85%;
+    --input: 214.3 20% 85%;
+    --ring: 243 75% 59%;
+    --radius: 0.5rem;
   }
 
   html,
@@ -14,8 +30,10 @@
   }
 
   body {
-    @apply bg-workspace-bg font-sans antialiased text-workspace-fg;
     margin: 0;
+    @apply font-sans antialiased;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
   }
 
   ::selection {

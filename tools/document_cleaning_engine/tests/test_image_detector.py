@@ -52,7 +52,7 @@ class TestImageDetector:
             doc.close()
 
     def test_unique_images_not_detected(self) -> None:
-        """不同图片不产生检测结果。"""
+        """不同图片仍作为候选上报（阈值 0，全部上报）。"""
         doc = fitz.open()
         try:
             for i in range(3):
@@ -62,13 +62,13 @@ class TestImageDetector:
                 page.insert_image(fitz.Rect(100, 100, 130 + i, 130 + i), pixmap=pix)
 
             results = self.detector.detect(doc)
-            # 没有重复图片，应无结果
-            assert len(results) == 0
+            # 阈值 0，所有图片都作为候选上报
+            assert len(results) == 3
         finally:
             doc.close()
 
     def test_large_image_low_risk(self) -> None:
-        """大面积图片应评分较低。"""
+        """大面积图片仍作为候选上报（阈值 0，全部上报）。"""
         doc = fitz.open()
         try:
             pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 500, 800))
@@ -77,8 +77,8 @@ class TestImageDetector:
             page.insert_image(page.rect, pixmap=pix)
 
             results = self.detector.detect(doc)
-            # 大面积且仅一页，应不检测为水印
-            assert len(results) == 0
+            # 阈值 0，即使大面积单页也作为候选上报
+            assert len(results) == 1
         finally:
             doc.close()
 
