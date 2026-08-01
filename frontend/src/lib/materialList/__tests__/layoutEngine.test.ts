@@ -2,7 +2,7 @@
 //
 // 覆盖 SubTask 10.1 验证项：
 //   - sortDirectoryChildren：文件夹优先 + 同类按名称升序（不区分大小写）
-//   - paginateChildren：默认 25 项/页，超项自动拆分，空数组返回空
+//   - paginateChildren：默认 19 项/页，超项自动拆分，空数组返回空
 //   - stripLeadingNumber：去除资料名称前序号前缀（如 "1. 项目.pdf" → "项目.pdf"）
 //   - formatImageFilename：< 100 两位零填充，≥ 100 升级三位零填充
 
@@ -169,7 +169,7 @@ describe("sortDirectoryChildren", () => {
 // ─── paginateChildren ───
 
 describe("paginateChildren", () => {
-  it("项数 ≤ 25 时返回单页", () => {
+  it("项数 ≤ 19 时返回单页", () => {
     const children = Array.from({ length: 10 }, (_, i) =>
       makeFile(`file${i}.pdf`, "pdf")
     );
@@ -178,42 +178,43 @@ describe("paginateChildren", () => {
     expect(pages[0].items).toHaveLength(10);
   });
 
-  it("项数 = 25 时返回单页（边界）", () => {
-    const children = Array.from({ length: 25 }, (_, i) =>
+  it("项数 = 19 时返回单页（边界）", () => {
+    const children = Array.from({ length: 19 }, (_, i) =>
       makeFile(`file${i}.pdf`, "pdf")
     );
     const pages = paginateChildren(children);
     expect(pages).toHaveLength(1);
-    expect(pages[0].items).toHaveLength(25);
+    expect(pages[0].items).toHaveLength(19);
   });
 
-  it("项数 = 26 时返回两页（25 + 1）", () => {
-    const children = Array.from({ length: 26 }, (_, i) =>
+  it("项数 = 20 时返回两页（19 + 1）", () => {
+    const children = Array.from({ length: 20 }, (_, i) =>
       makeFile(`file${i}.pdf`, "pdf")
     );
     const pages = paginateChildren(children);
     expect(pages).toHaveLength(2);
-    expect(pages[0].items).toHaveLength(25);
+    expect(pages[0].items).toHaveLength(19);
     expect(pages[1].items).toHaveLength(1);
   });
 
-  it("项数 = 50 时返回两页（25 + 25）", () => {
-    const children = Array.from({ length: 50 }, (_, i) =>
+  it("项数 = 38 时返回两页（19 + 19）", () => {
+    const children = Array.from({ length: 38 }, (_, i) =>
       makeFile(`file${i}.pdf`, "pdf")
     );
     const pages = paginateChildren(children);
     expect(pages).toHaveLength(2);
-    expect(pages[0].items).toHaveLength(25);
-    expect(pages[1].items).toHaveLength(25);
+    expect(pages[0].items).toHaveLength(19);
+    expect(pages[1].items).toHaveLength(19);
   });
 
-  it("项数 = 75 时返回三页", () => {
+  it("项数 = 75 时返回四页（19 + 19 + 19 + 18）", () => {
     const children = Array.from({ length: 75 }, (_, i) =>
       makeFile(`file${i}.pdf`, "pdf")
     );
     const pages = paginateChildren(children);
-    expect(pages).toHaveLength(3);
-    expect(pages.every((p) => p.items.length === 25)).toBe(true);
+    expect(pages).toHaveLength(4);
+    expect(pages.slice(0, 3).every((p) => p.items.length === 19)).toBe(true);
+    expect(pages[3].items).toHaveLength(18);
   });
 
   it("自定义 maxItemsPerPage", () => {
@@ -257,8 +258,8 @@ describe("paginateChildren", () => {
     ]);
   });
 
-  it("默认 maxItemsPerPage 为 25", () => {
-    expect(DEFAULT_MAX_ITEMS_PER_PAGE).toBe(25);
+  it("默认 maxItemsPerPage 为 19（与画布容量一致）", () => {
+    expect(DEFAULT_MAX_ITEMS_PER_PAGE).toBe(19);
   });
 
   it("maxItemsPerPage = 0 时防御性处理为 1", () => {

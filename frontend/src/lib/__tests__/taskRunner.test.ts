@@ -14,18 +14,20 @@ import { runQueue, runTask } from "../taskRunner";
 import { MockPageProcessor } from "../mockPageProcessor";
 import { useTaskStore } from "../../store/useTaskStore";
 import type { TaskConfig } from "../../types/task";
-import { convertWordToPdf } from "../wordConverter";
+import { convertWordFilesToPdf } from "../wordConverter";
 import { TaskController } from "../taskController";
 import type { TaskBreakpoint } from "../persistence";
 import { saveBreakpoint } from "../persistence";
 
 // Mock wordConverter 模块，避免测试中调用真实 Tauri invoke。
-// 默认实现：返回一个与原 Word 同 stem 的 PDF 缓存路径。
+// 默认实现：批量返回与原 Word 同 stem 的 PDF 缓存路径。
 vi.mock("../wordConverter", () => ({
-  convertWordToPdf: vi.fn(async (wordPath: string, _taskId: string) => {
-    const stem = wordPath.replace(/\\/g, "/").split("/").pop() ?? "";
-    const name = stem.replace(/\.(docx|doc)$/i, "");
-    return `/cache/${name}.pdf`;
+  convertWordFilesToPdf: vi.fn(async (files: string[], _taskId: string) => {
+    return files.map((wordPath: string) => {
+      const stem = wordPath.replace(/\\/g, "/").split("/").pop() ?? "";
+      const name = stem.replace(/\.(docx|doc)$/i, "");
+      return { wordPath, pdfPath: `/cache/${name}.pdf`, error: null };
+    });
   }),
 }));
 
@@ -386,7 +388,7 @@ describe("Word 输入预处理", () => {
     resetStore();
     // 清除 mock 调用记录与一次性实现（mockRejectedValueOnce 等），
     // 默认实现由 vi.mock 工厂提供，保持不变。
-    vi.mocked(convertWordToPdf).mockClear();
+    vi.mocked(convertWordFilesToPdf).mockClear();
   });
 
   it("Word 文件转换成功后进入 PDF 处理链路", async () => {
@@ -397,10 +399,10 @@ describe("Word 输入预处理", () => {
     const processor = new MockPageProcessor();
     const result = await runTask(task, processor);
 
-    // convertWordToPdf 被调用一次，返回 /cache/report.pdf
-    expect(convertWordToPdf).toHaveBeenCalledTimes(1);
-    expect(convertWordToPdf).toHaveBeenCalledWith(
-      "/test/report.docx",
+    // convertWordFilesToPdf 被调用一次，返回 /cache/report.pdf
+    expect(convertWordFilesToPdf).toHaveBeenCalledTimes(1);
+    expect(convertWordFilesToPdf).toHaveBeenCalledWith(
+      ["/test/report.docx"],
       task.taskId
     );
 
@@ -420,8 +422,8 @@ describe("Word 输入预处理", () => {
   });
 
   it("Word 转换失败记录为 failed 并继续其他 PDF", async () => {
-    // 让 fail-word.docx 的转换抛错（仅影响下一次调用）
-    vi.mocked(convertWordToPdf).mockRejectedValueOnce(
+    // 让批量转换抛错（仅影响下一次调用）
+    vi.mocked(convertWordFilesToPdf).mockRejectedValueOnce(
       new Error("LibreOffice 未安装")
     );
 
@@ -479,8 +481,9 @@ describe("Word 输入预处理", () => {
     // summary.totalPdfCount 计入两个文件
     expect(result.summary.totalPdfCount).toBe(2);
 
-    // convertWordToPdf 仅对 b.docx 调用一次
-    expect(convertWordToPdf).toHaveBeenCalledTimes(1);
+    // convertWordFilesToPdf 仅对 b.docx 调用一次
+    expect(convertWordFilesToPdf).toHaveBeenCalledTimes(1);
+    expect(convertWordFilesToPdf).toHaveBeenCalledWith(["/test/b.docx"], task.taskId);
   });
 });
 

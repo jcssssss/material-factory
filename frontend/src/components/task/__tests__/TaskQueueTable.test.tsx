@@ -66,6 +66,24 @@ describe("TaskQueueTable", () => {
     expect(screen.getByText("前 3 页")).toBeInTheDocument();
   });
 
+  it("表头显示页数列", () => {
+    useTaskStore.getState().enqueueTask(mockTask());
+    renderTable();
+    expect(screen.getByText("页数")).toBeInTheDocument();
+  });
+
+  it("totalPages 未设置时页数列显示占位符", () => {
+    useTaskStore.getState().enqueueTask(mockTask());
+    renderTable();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("totalPages 设置后页数列显示页数", () => {
+    useTaskStore.getState().enqueueTask(mockTask({ totalPages: 37 }));
+    renderTable();
+    expect(screen.getByText("37")).toBeInTheDocument();
+  });
+
   it("清空按钮清空队列", async () => {
     const user = userEvent.setup();
     useTaskStore.getState().enqueueTask(mockTask());

@@ -51,6 +51,7 @@ type TaskStoreState = {
   removeTask: (taskId: string) => void;
   clearQueue: () => void;
   updateTaskStatus: (taskId: string, status: TaskStatus) => void;
+  updateTaskPages: (taskId: string, totalPages: number) => void;
 
   // 执行占位（Task 3 中由 taskRunner 接管）
   setProgress: (progress: ExecutionProgress | null) => void;
@@ -103,6 +104,7 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     customPages: "",
     generateMaterialList: true,
     generatePrintImages: true,
+    backgroundTemplateIds: [],
   },
   breakpoints: {},
 
@@ -129,6 +131,14 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
     set((s) => ({
       queue: s.queue.map((t) =>
         t.taskId === taskId ? { ...t, status } : t
+      ),
+    })),
+
+  // 任务预扫描完成后写回要处理的页数，供队列"页数"列展示。
+  updateTaskPages: (taskId, totalPages) =>
+    set((s) => ({
+      queue: s.queue.map((t) =>
+        t.taskId === taskId ? { ...t, totalPages } : t
       ),
     })),
 

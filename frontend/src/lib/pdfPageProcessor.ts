@@ -28,6 +28,7 @@ import {
   readPdfBytes,
   renderPageToCanvas,
   destroyPdfDocument,
+  isCanvasBlank,
 } from "./pdf";
 import {
   exportPageAsJpegBytes,
@@ -238,13 +239,27 @@ export class PdfPageProcessor implements PageProcessor {
       );
       logger.pageInfo(task.taskId, pdfPath, pageNumber,
         `PDF 页面渲染完成，canvas 尺寸：${sourceCanvas.width}x${sourceCanvas.height}`);
+
+      // 2. 空白页检测：画布恒为白底时说明该页没有绘出可见内容（可能是确实
+      //    为空的页面，也可能是渲染异常）。仅记 warn 帮助排查，不中断、不重试。
+      //    （曾尝试 disableFontFace 回退重渲染，实测对需要 CMap 的中文字体反而
+      //    更差，故移除；空白页根因是 stopAtErrors 误中止解析，见 pdf.ts。）
+      if (isCanvasBlank(sourceCanvas)) {
+        logger.pageWarn(task.taskId, pdfPath, pageNumber,
+          `页面渲染结果疑似空白`);
+      }
       // 渲染完成后清理 page 资源。
       page.cleanup();
 
-      // 2. 合成 3:4 画布 + 导出 JPG（300 DPI 元数据嵌入）。
+      // 3. 合成 3:4 画布 + 导出 JPG（300 DPI 元数据嵌入）。
       const jpegBytes = await exportPageAsJpegBytes(sourceCanvas);
 
-      // 3. 确保输出目录存在。
+      // 释放源 canvas 显存：宽高归零强制 WebKit 回收 GPU 显存。
+      // 不释放会逐页累积（每页 ~30MB RGBA），任务末尾 getContext('2d') 稳定返回 null。
+      sourceCanvas.width = 0;
+      sourceCanvas.height = 0;
+
+      // 4. 确保输出目录存在。
       //    输出目录不可写 → 页级失败（taskRunner 会继续下一页；
       //    虽然下一页也会失败，但保持页级粒度符合 spec）。
       const fileName = buildPageImageFileName(workItem.pdfName, pageNumber);
@@ -256,7 +271,7 @@ export class PdfPageProcessor implements PageProcessor {
         throw classifyWriteError(pdfOutputDir, err);
       }
 
-      // 4. 写入磁盘。写盘失败（磁盘满 / 权限）→ 页级失败。
+      // 5. 写入磁盘。写盘失败（磁盘满 / 权限）→ 页级失败。
       // 路径作为二进制前缀编码到 body，invoke 顶层传 Uint8Array → 零序列化，
       // 避免原来 Array.from(jpegBytes) → JSON 数字数组字符串在主线程阻塞。
       try {
@@ -265,7 +280,7 @@ export class PdfPageProcessor implements PageProcessor {
         throw classifyWriteError(outputPath, err);
       }
 
-      // 5. 如果是最后一页，销毁 PDF 文档释放资源。
+      // 6. 如果是最后一页，销毁 PDF 文档释放资源。
       const selectedPages = workItem.selectedPages;
       const isLastPage = pageNumber === selectedPages[selectedPages.length - 1];
       if (isLastPage) {

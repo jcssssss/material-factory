@@ -24,8 +24,10 @@ export type LayoutPage = {
 };
 
 // 默认每页最大项数。
-// 与 spec.md "自动分页规则" 一致：单张图片承载 25 项。
-export const DEFAULT_MAX_ITEMS_PER_PAGE = 25;
+// 由 imageRenderer 的画布几何决定：画布高 1656 − 上边距 80，每行 80px，
+// 最多完整容纳 19 行（(1656 − 80) / 80 ≈ 19.7）。超过该值的内容会被绘制到
+// 画布外而丢失，因此分页上限必须与渲染容量一致（见 imageRenderer.MAX_ITEMS_PER_PAGE）。
+export const DEFAULT_MAX_ITEMS_PER_PAGE = 19;
 
 // 去除资料名称前的序号前缀（如 "1. 项目.pdf" → "项目.pdf"）。
 // 匹配模式：开头数字 + 分隔符（. 、 - _） + 可选空白。

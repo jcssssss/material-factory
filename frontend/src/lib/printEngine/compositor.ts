@@ -19,6 +19,7 @@ var bgCache = null;  // { bitmaps: ImageBitmap[], widths: number[], heights: num
 
 self.onmessage = async function(e) {
   var msg = e.data;
+  var reqId = msg.reqId;
 
   if (msg.type === 'init') {
     var bufs = msg.bgBufs;
@@ -27,13 +28,13 @@ self.onmessage = async function(e) {
       bitmaps.push(await createImageBitmap(new Blob([bufs[i]])));
     }
     bgCache = { bitmaps: bitmaps, widths: msg.bgWidths, heights: msg.bgHeights };
-    self.postMessage({ type: 'ready' });
+    self.postMessage({ type: 'ready', reqId: reqId });
     return;
   }
 
   if (msg.type === 'compose') {
     try {
-      var bgIdx = msg.bgIdx;
+      var bgIdx = msg.bgIndex;
       var bg = bgCache.bitmaps[bgIdx];
       var bgW = bgCache.widths[bgIdx];
       var bgH = bgCache.heights[bgIdx];
@@ -41,8 +42,18 @@ self.onmessage = async function(e) {
       var warped = await createImageBitmap(
         new ImageData(new Uint8ClampedArray(msg.warpedBuf), bgW, bgH)
       );
-      var canvas = new OffscreenCanvas(W, H);
-      var ctx = canvas.getContext('2d');
+      // WebView 在 GPU/内存紧张时偶发返回 null 2D 上下文，重试新建 canvas 防御。
+      var ctx = null;
+      for (var attempt = 0; attempt < 3 && !ctx; attempt++) {
+        if (attempt > 0) {
+          await new Promise(function(r) { setTimeout(r, 150 * attempt); });
+        }
+        var canvas = new OffscreenCanvas(W, H);
+        ctx = canvas.getContext('2d');
+      }
+      if (!ctx) {
+        throw new Error('无法获取 2D Canvas 上下文');
+      }
 
       var scale = Math.min(W / bgW, H / bgH);
       var dw = Math.round(bgW * scale);
@@ -61,45 +72,72 @@ self.onmessage = async function(e) {
 
       var blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 1.0 });
       var buf = await blob.arrayBuffer();
-      self.postMessage({ type: 'result', buffer: buf }, [buf]);
+      self.postMessage({ type: 'result', reqId: reqId, buffer: buf }, [buf]);
       warped.close();
     } catch (err) {
-      self.postMessage({ type: 'error', message: err.message || String(err) });
+      self.postMessage({ type: 'error', reqId: reqId, message: err.message || String(err) });
     }
   }
 };
 `;
 
 let _workerBlobUrl: string | null = null;
+// reqId → { resolve, reject }，按 Worker 实例隔离；composeInWorker 注册、
+// worker.onmessage 路由、onerror 统一 reject。
+const _workerPending = new WeakMap<Worker, Map<number, {
+  resolve: (buf: ArrayBuffer) => void;
+  reject: (err: Error) => void;
+}>>();
+let _nextReqId = 1;
 
+// 主线程到 Worker 的请求分发器。CONCURRENCY>1 时多个 compose 请求并发在途，
+// 若每帧重设 worker.onmessage，后设的 handler 会覆盖前一个，导致早前帧的
+// promise 永远收不到结果而卡死。改用单一持久 handler，按 reqId 路由回对应 promise。
 function createComposeWorker(
   bgBufs: ArrayBuffer[],
   bgWidths: number[],
   bgHeights: number[],
 ): Promise<Worker> {
-  return new Promise((resolve, reject) => {
+  return new Promise<Worker>((resolve) => {
     if (!_workerBlobUrl) {
       _workerBlobUrl = URL.createObjectURL(
         new Blob([COMPOSE_WORKER_CODE], { type: "application/javascript" }),
       );
     }
     const worker = new Worker(_workerBlobUrl);
+    const pending = new Map<number, {
+      resolve: (buf: ArrayBuffer) => void;
+      reject: (err: Error) => void;
+    }>();
+    _workerPending.set(worker, pending);
 
     worker.onmessage = (e: MessageEvent) => {
-      if (e.data.type === "ready") {
-        worker.onmessage = null; // 清除 init 监听，后续由调用方接管 onmessage
+      const data = e.data;
+      if (data.type === "ready") {
         resolve(worker);
+        return;
+      }
+      const handler = pending.get(data.reqId);
+      if (!handler) return;
+      pending.delete(data.reqId);
+      if (data.type === "result") {
+        handler.resolve(data.buffer as ArrayBuffer);
+      } else {
+        handler.reject(new Error(data.message));
       }
     };
 
     worker.onerror = (err) => {
+      for (const h of pending.values()) {
+        h.reject(new Error(`Worker 合成失败：${err.message}`));
+      }
+      pending.clear();
       worker.terminate();
-      reject(new Error(`Worker 启动失败：${err.message}`));
     };
 
     // 转移所有背景 buffer 所有权到 Worker（零拷贝）
     worker.postMessage(
-      { type: "init", bgBufs, bgWidths, bgHeights },
+      { type: "init", reqId: 0, bgBufs, bgWidths, bgHeights },
       bgBufs,
     );
   });
@@ -110,22 +148,35 @@ function composeInWorker(
   warpedBuffer: ArrayBuffer,
   bgIndex: number,
 ): Promise<ArrayBuffer> {
-  return new Promise((resolve, reject) => {
+  let pending = _workerPending.get(worker);
+  if (!pending) {
+    // 未注册的 worker（如测试直接 new 的 mock）：安装最小分发器。
+    // 生产路径始终经过 createComposeWorker，此处仅兜底。
+    pending = new Map();
+    _workerPending.set(worker, pending);
     worker.onmessage = (e: MessageEvent) => {
-      if (e.data.type === "result") {
-        resolve(e.data.buffer as ArrayBuffer);
-      } else if (e.data.type === "error") {
-        reject(new Error(e.data.message));
+      const data = e.data;
+      if (data.reqId !== undefined) {
+        const h = pending!.get(data.reqId);
+        if (!h) return;
+        pending!.delete(data.reqId);
+        if (data.type === "result") h.resolve(data.buffer as ArrayBuffer);
+        else h.reject(new Error(data.message));
+      } else if (pending!.size > 0) {
+        // 无 reqId（测试 mock）：路由给最近的请求
+        const last = [...pending!.values()].pop()!;
+        pending!.clear();
+        if (data.type === "result") last.resolve(data.buffer as ArrayBuffer);
+        else last.reject(new Error(data.message));
       }
     };
-
-    worker.onerror = (err) => {
-      reject(new Error(`Worker 合成失败：${err.message}`));
-    };
-
+  }
+  const reqId = _nextReqId++;
+  return new Promise((resolve, reject) => {
+    pending!.set(reqId, { resolve, reject });
     // 转移 warp 数据所有权到 Worker（零拷贝）
     worker.postMessage(
-      { type: "compose", warpedBuf: warpedBuffer, bgIdx: bgIndex },
+      { type: "compose", reqId, warpedBuf: warpedBuffer, bgIndex },
       [warpedBuffer],
     );
   });

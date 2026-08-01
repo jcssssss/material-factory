@@ -24,6 +24,7 @@ jobs:
         with:
           toolchain: stable
       - run: npm ci
+      - run: bash ../scripts/prepare-libreoffice.sh
       - run: npm run tauri build
       - uses: softprops/action-gh-release@v2
         with:
@@ -46,6 +47,7 @@ jobs:
         with:
           toolchain: stable
       - run: npm ci
+      - run: bash ../scripts/prepare-libreoffice.sh
       - run: npm run tauri build
       - uses: softprops/action-gh-release@v2
         with:

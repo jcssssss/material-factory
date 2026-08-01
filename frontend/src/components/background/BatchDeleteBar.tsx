@@ -2,9 +2,10 @@ type Props = {
   selectedCount: number;
   onDelete: () => void;
   onCancel: () => void;
+  onCalibrate?: () => void;
 };
 
-export default function BatchDeleteBar({ selectedCount, onDelete, onCancel }: Props) {
+export default function BatchDeleteBar({ selectedCount, onDelete, onCancel, onCalibrate }: Props) {
   if (selectedCount === 0) return null;
 
   return (
@@ -20,6 +21,15 @@ export default function BatchDeleteBar({ selectedCount, onDelete, onCancel }: Pr
         >
           取消选择
         </button>
+        {onCalibrate && (
+          <button
+            type="button"
+            onClick={onCalibrate}
+            className="inline-flex items-center gap-1 rounded-lg bg-workspace-accent px-4 py-1.5 text-xs font-medium text-white transition hover:bg-indigo-700"
+          >
+            标定选中 {selectedCount} 项
+          </button>
+        )}
         <button
           type="button"
           onClick={onDelete}

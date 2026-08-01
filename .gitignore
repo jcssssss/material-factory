@@ -38,6 +38,9 @@ src-tauri/gen
 # Playwright
 test-results/
 
+# 捆绑资源（LibreOffice 等大文件，构建前由脚本下载）
+vendor/
+
 # Build artifacts (TypeScript composite project output)
 *.tsbuildinfo
 vite.config.d.ts

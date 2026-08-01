@@ -35,6 +35,13 @@ export const PAGE_PADDING = 80;
 // 每行高度（图标 + 文件名垂直居中 + 行间距）。
 export const ROW_HEIGHT = 80;
 
+// 单页最多可完整容纳的行数：画布高 1656 − 上边距 80，每行 80px。
+// 分页器（layoutEngine.paginateChildren）必须以此为准，否则超出的行会被
+// 绘制到画布外而丢失。
+export const MAX_ITEMS_PER_PAGE = Math.floor(
+  (MATERIAL_IMAGE_HEIGHT - PAGE_PADDING) / ROW_HEIGHT
+);
+
 // 图标绘制尺寸（与 SVG 视口一致，1:1 绘制避免缩放模糊）。
 export const ICON_SIZE = 64;
 
@@ -92,7 +99,14 @@ export async function renderLayoutPageToCanvas(
   canvas.width = MATERIAL_IMAGE_WIDTH;
   canvas.height = MATERIAL_IMAGE_HEIGHT;
 
-  const ctx = canvas.getContext("2d");
+  // Tauri WebView 在长任务/高内存下偶发返回 null 2D 上下文；重试新建 canvas 防御。
+  let ctx: CanvasRenderingContext2D | null = null;
+  for (let attempt = 0; attempt < 3 && !ctx; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 100 * attempt));
+    }
+    ctx = canvas.getContext("2d");
+  }
   if (!ctx) {
     throw new Error("无法获取 Canvas 2D 上下文");
   }

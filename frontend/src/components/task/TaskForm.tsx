@@ -1,14 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useTaskStore, createTaskId } from "../../store/useTaskStore";
 import type { TaskConfig } from "../../types/task";
+import type { BackgroundTemplate } from "../../types/background";
 import { FilePickerButton } from "../common/FilePickerButton";
 import { PageRuleInput } from "./PageRuleInput";
 import {
   isSupportedInputPath,
 } from "../../lib/inputValidation";
 import { validateFormPageRule } from "../../lib/pageRule";
-import { listTemplates } from "../../lib/printEngine/backgroundDb";
+import {
+  listTemplates,
+  readBackgroundThumbnail,
+} from "../../lib/printEngine/backgroundDb";
 import { Input } from "../ui/input";
 import { Checkbox } from "../ui/checkbox";
 import { Label } from "../ui/label";
@@ -73,6 +77,52 @@ export function TaskForm() {
   const enqueueTask = useTaskStore((s) => s.enqueueTask);
   const navigate = useNavigate();
   const [showCalibrationAlert, setShowCalibrationAlert] = useState(false);
+  const [calibratedTemplates, setCalibratedTemplates] = useState<BackgroundTemplate[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<BackgroundTemplate | null>(null);
+  const [selectedThumb, setSelectedThumb] = useState<string | null>(null);
+  const selectedThumbRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listTemplates()
+      .then((all) => {
+        if (!cancelled) setCalibratedTemplates(all.filter((t) => t.calibrated));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 选中模板展示：随 draft.backgroundTemplateIds 变化，加载名称与缩略图
+  useEffect(() => {
+    const ids = draft.backgroundTemplateIds ?? [];
+    const t =
+      ids.length > 0
+        ? calibratedTemplates.find((x) => x.id === ids[0]) ?? null
+        : null;
+    setSelectedTemplate(t);
+    if (selectedThumbRef.current) {
+      URL.revokeObjectURL(selectedThumbRef.current);
+      selectedThumbRef.current = null;
+    }
+    setSelectedThumb(null);
+    if (!t) return;
+    let cancelled = false;
+    void readBackgroundThumbnail(t.file_name)
+      .then((buf) => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(
+          new Blob([buf], { type: "image/jpeg" }),
+        );
+        selectedThumbRef.current = url;
+        setSelectedThumb(url);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [draft.backgroundTemplateIds, calibratedTemplates]);
 
   const fieldErrors = useMemo(() => computeFieldErrors({
     taskName: draft.taskName,
@@ -106,6 +156,7 @@ export function TaskForm() {
       generateMaterialList:
         draft.sourceType === "folder" && draft.generateMaterialList,
       generatePrintImages: draft.generatePrintImages,
+      backgroundTemplateIds: draft.backgroundTemplateIds,
     };
     enqueueTask(task);
     resetDraft();
@@ -117,8 +168,9 @@ export function TaskForm() {
       return;
     }
     const templates = await listTemplates();
-    const hasCalibrated = templates.some((t) => t.calibrated);
-    if (!hasCalibrated) {
+    const calibrated = templates.filter((t) => t.calibrated);
+    setCalibratedTemplates(calibrated);
+    if (calibrated.length === 0) {
       setShowCalibrationAlert(true);
       return;
     }
@@ -282,6 +334,65 @@ export function TaskForm() {
           [背景模板]
         </a>
       </div>
+
+      {/* 选择合成模板 */}
+      {draft.generatePrintImages && (
+        <div className="space-y-1.5 rounded-lg border bg-card p-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-foreground">合成背景模板</span>
+            {selectedTemplate && (
+              <button
+                type="button"
+                onClick={() => setDraft({ backgroundTemplateIds: [] })}
+                className="text-[10px] font-medium text-muted-foreground underline transition hover:text-foreground"
+              >
+                清除选择
+              </button>
+            )}
+          </div>
+          {selectedTemplate ? (
+            <div className="flex items-center gap-2.5 rounded-lg border bg-muted/20 p-2">
+              <div className="h-11 w-9 shrink-0 overflow-hidden rounded-md bg-slate-100">
+                {selectedThumb ? (
+                  <img
+                    src={selectedThumb}
+                    alt={selectedTemplate.file_name}
+                    className="h-full w-full object-cover"
+                  />
+                ) : null}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-xs font-medium text-foreground">
+                  {selectedTemplate.file_name}
+                </p>
+                <p className="text-[10px] text-muted-foreground">
+                  {selectedTemplate.width}×{selectedTemplate.height} · 已标定
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate("/backgrounds?select=1")}
+                className="shrink-0 text-[10px] font-medium text-primary underline transition hover:text-primary/80"
+              >
+                更换
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => navigate("/backgrounds?select=1")}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs font-medium text-primary transition hover:bg-primary/10"
+            >
+              选择模板
+            </button>
+          )}
+          {!selectedTemplate && (
+            <p className="text-[10px] text-muted-foreground">
+              未选择将使用全部已标定模板随机轮换
+            </p>
+          )}
+        </div>
+      )}
 
       {/* 输出根目录 */}
       <div className="space-y-2 rounded-lg border bg-card p-3">

@@ -3,6 +3,7 @@ import { useLocation, useNavigate, matchPath } from "react-router-dom";
 import type { BackgroundTemplate, CalibrationCorners } from "../types/background";
 import { getTemplate, saveCalibration, readBackgroundFile } from "../lib/printEngine/backgroundDb";
 import CornerCalibrator from "../components/background/CornerCalibrator";
+import { cn } from "@/lib/utils";
 
 export default function CalibratePage() {
   const location = useLocation();
@@ -11,6 +12,13 @@ export default function CalibratePage() {
     const match = matchPath("/calibrate/:id", location.pathname);
     return match?.params?.id;
   }, [location.pathname]);
+  // 批量标定队列（由上传页经 ?ids=id1,id2,... 传入）
+  const queueIds = useMemo(() => {
+    const params = new URLSearchParams(location.search);
+    return (params.get("ids")?.split(",") ?? []).filter(Boolean);
+  }, [location.search]);
+  const queueIndex = queueIds.indexOf(id ?? "");
+  const hasNext = queueIndex >= 0 && queueIndex < queueIds.length - 1;
   const [template, setTemplate] = useState<BackgroundTemplate | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -20,6 +28,11 @@ export default function CalibratePage() {
   const imageUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // 切换 id（保存并下一张 / 上一步）时进入加载态，但保留旧内容做平滑过渡，避免闪烁
+    setLoading(true);
+    setCorners(null);
+    setError(null);
+
     if (!id) {
       setError("缺少模板 ID，请从背景模板页重新进入");
       setLoading(false);
@@ -72,13 +85,28 @@ export default function CalibratePage() {
     };
   }, [id]);
 
+  function handleBack() {
+    if (queueIndex > 0) {
+      // 批量标定：还有上一张 → 跳转上一张并重新加载
+      navigate(`/calibrate/${queueIds[queueIndex - 1]}?ids=${queueIds.join(",")}`);
+    } else {
+      // 第一张或无队列 → 返回背景模板列表
+      navigate("/backgrounds");
+    }
+  }
+
   async function handleSave() {
     if (!id || !corners) return;
     setSaving(true);
     setError(null);
     try {
       await saveCalibration(id, corners);
-      navigate("/backgrounds");
+      if (hasNext) {
+        // 批量标定：保存后自动进入下一张
+        navigate(`/calibrate/${queueIds[queueIndex + 1]}?ids=${queueIds.join(",")}`);
+      } else {
+        navigate("/backgrounds");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -86,7 +114,8 @@ export default function CalibratePage() {
     }
   }
 
-  if (loading) {
+  if (loading && !template) {
+    // 仅首次进入时显示全屏加载；切换模板时保留旧内容做平滑过渡
     return (
       <div className="flex h-full items-center justify-center text-workspace-muted">
         <div className="flex items-center gap-2">
@@ -118,7 +147,7 @@ export default function CalibratePage() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => navigate(-1)}
+            onClick={handleBack}
             className="inline-flex items-center gap-1 rounded-lg border border-workspace-border bg-white px-2.5 py-1.5 text-xs font-medium text-workspace-fg-secondary shadow-sm transition hover:bg-slate-50"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-3.5 w-3.5">
@@ -134,6 +163,11 @@ export default function CalibratePage() {
                   {template.width}×{template.height}
                 </span>
               </>
+            )}
+            {queueIds.length > 1 && queueIndex >= 0 && (
+              <span className="ml-3 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+                第 {queueIndex + 1}/{queueIds.length} 张
+              </span>
             )}
           </div>
         </div>
@@ -154,20 +188,35 @@ export default function CalibratePage() {
                 保存中…
               </>
             ) : (
-              "保存标定"
+              hasNext ? "保存并下一张" : "保存标定"
             )}
           </button>
         </div>
       </div>
 
       {imageUrl && template && (
-        <CornerCalibrator
-          imageUrl={imageUrl}
-          imgWidth={template.width}
-          imgHeight={template.height}
-          initialCorners={corners}
-          onCornersChange={setCorners}
-        />
+        <div
+          className={cn(
+            "relative flex-1 transition-opacity duration-300",
+            loading ? "opacity-40" : "opacity-100",
+          )}
+        >
+          <CornerCalibrator
+            imageUrl={imageUrl}
+            imgWidth={template.width}
+            imgHeight={template.height}
+            initialCorners={corners}
+            onCornersChange={setCorners}
+          />
+          {loading && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center">
+              <span className="flex items-center gap-2 rounded-full bg-white/80 px-3 py-1.5 text-xs text-workspace-muted shadow">
+                <span className="h-3 w-3 animate-spin rounded-full border-2 border-indigo-400 border-t-transparent" />
+                加载中…
+              </span>
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

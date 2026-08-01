@@ -23,13 +23,14 @@ mod warp;
 mod watermark;
 mod python_bridge;
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{command, Manager};
 use tauri::ipc::{InvokeBody, Request, Response};
 
@@ -64,6 +65,7 @@ pub fn run() {
             clear_log_file,
             check_libreoffice,
             convert_word_to_pdf,
+            convert_word_files_to_pdf,
             scan_folder_tree,
             background::save_background_file,
             background::read_background_file,
@@ -307,8 +309,50 @@ struct LibreOfficeStatus {
 // 检测 LibreOffice 可执行文件路径。
 // 优先检查常见安装路径；若均不存在，回退到 PATH 查找（which/where）。
 // 复用 check_libreoffice 命令与 convert_word_to_pdf 命令的检测逻辑。
-fn find_libreoffice() -> Option<PathBuf> {
-    // 常见安装路径（按平台区分）
+// 验证 soffice 可执行文件真实可用（运行 --version 成功）。
+// PATH 回退可能命中包装脚本，其指向的 LibreOffice 已不存在；
+// 仅检查文件存在不足，需实际运行确认，避免转换时报 "No such file or directory"。
+fn soffice_usable(path: &Path) -> bool {
+    let (tx, rx) = mpsc::channel();
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    thread::spawn(move || {
+        let _ = tx.send(cmd.output());
+    });
+    matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Ok(o)) if o.status.success())
+}
+
+fn find_libreoffice(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // 1) 优先应用捆绑的资源目录（随安装包分发的 LibreOffice）
+    if let Ok(res) = app.path().resource_dir() {
+        // Tauri 打包 resources 可能带 _up_ 前缀、保留 vendor 顶层，逐一尝试
+        let mut bundled_paths: Vec<PathBuf> = Vec::new();
+        #[cfg(target_os = "macos")]
+        for base in [
+            res.join("_up_/vendor/libreoffice"),
+            res.join("vendor/libreoffice"),
+            res.join("_up_/libreoffice"),
+            res.join("libreoffice"),
+        ] {
+            bundled_paths.push(base.join("LibreOffice.app/Contents/MacOS/soffice"));
+        }
+        #[cfg(target_os = "windows")]
+        for base in [
+            res.join("_up_/vendor/libreoffice"),
+            res.join("vendor/libreoffice"),
+            res.join("_up_/libreoffice"),
+            res.join("libreoffice"),
+        ] {
+            bundled_paths.push(base.join("program/soffice.exe"));
+        }
+        for p in bundled_paths {
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    // 2) 回退到系统常见安装路径（按平台区分）
     #[cfg(target_os = "macos")]
     let candidates: Vec<PathBuf> = vec![PathBuf::from(
         "/Applications/LibreOffice.app/Contents/MacOS/soffice",
@@ -320,10 +364,17 @@ fn find_libreoffice() -> Option<PathBuf> {
         PathBuf::from("/usr/local/bin/soffice"),
     ];
     #[cfg(target_os = "windows")]
-    let candidates: Vec<PathBuf> = vec![
-        PathBuf::from(r"C:\Program Files\LibreOffice\program\soffice.exe"),
-        PathBuf::from(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
-    ];
+    let candidates: Vec<PathBuf> = {
+        let mut v = vec![
+            PathBuf::from(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+            PathBuf::from(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
+        ];
+        // 用户级（per-user MSI）安装，常见于 Windows 10+
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            v.push(PathBuf::from(local).join(r"Programs\LibreOffice\program\soffice.exe"));
+        }
+        v
+    };
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     let candidates: Vec<PathBuf> = vec![];
 
@@ -333,16 +384,21 @@ fn find_libreoffice() -> Option<PathBuf> {
         }
     }
 
-    // 回退到 PATH 查找：Unix 用 which，Windows 用 where
+    // 回退到 PATH 查找：Unix 用 which，Windows 用 where。
+    // 遍历所有候选行，仅当真实可运行才返回，否则视为未安装。
     #[cfg(unix)]
     {
         if let Ok(output) = Command::new("which").arg("soffice").output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let trimmed = first_line.trim();
-                    if !trimmed.is_empty() {
-                        return Some(PathBuf::from(trimmed));
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let p = PathBuf::from(trimmed);
+                    if p.is_file() && soffice_usable(&p) {
+                        return Some(p);
                     }
                 }
             }
@@ -353,10 +409,14 @@ fn find_libreoffice() -> Option<PathBuf> {
         if let Ok(output) = Command::new("where").arg("soffice").output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = stdout.lines().next() {
-                    let trimmed = first_line.trim();
-                    if !trimmed.is_empty() {
-                        return Some(PathBuf::from(trimmed));
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let p = PathBuf::from(trimmed);
+                    if p.is_file() && soffice_usable(&p) {
+                        return Some(p);
                     }
                 }
             }
@@ -367,10 +427,10 @@ fn find_libreoffice() -> Option<PathBuf> {
 }
 
 // 检测 LibreOffice 是否可用。供前端在启用 Word 输入前预检。
-// 命令不接受参数，检测失败也返回 available=false（不返回错误）。
+// 优先应用捆绑版本，其次系统安装。检测失败也返回 available=false（不返回错误）。
 #[command]
-fn check_libreoffice() -> LibreOfficeStatus {
-    match find_libreoffice() {
+fn check_libreoffice(app: tauri::AppHandle) -> LibreOfficeStatus {
+    match find_libreoffice(&app) {
         Some(p) => LibreOfficeStatus {
             available: true,
             path: Some(p.to_string_lossy().to_string()),
@@ -387,8 +447,21 @@ fn check_libreoffice() -> LibreOfficeStatus {
 // 转换成功后返回 PDF 路径，前端复用现有 PDF 处理链路。
 // 超时（120 秒）或转换失败时返回友好错误，由任务级失败隔离处理。
 #[command]
-fn convert_word_to_pdf(
+async fn convert_word_to_pdf(
     app: tauri::AppHandle,
+    word_path: String,
+    task_id: String,
+) -> Result<String, String> {
+    // 转换含 soffice 子进程等待，放阻塞线程池执行，避免冻结 UI 线程
+    tauri::async_runtime::spawn_blocking(move || {
+        convert_word_to_pdf_sync(&app, word_path, task_id)
+    })
+    .await
+    .map_err(|e| format!("Word 转换后台执行失败：{e}"))?
+}
+
+fn convert_word_to_pdf_sync(
+    app: &tauri::AppHandle,
     word_path: String,
     task_id: String,
 ) -> Result<String, String> {
@@ -408,8 +481,8 @@ fn convert_word_to_pdf(
         return Err(format!("仅支持 .docx / .doc 文件：{}", word_path));
     }
 
-    // 获取 LibreOffice 路径
-    let soffice = find_libreoffice().ok_or_else(|| {
+    // 获取 LibreOffice 路径（优先应用捆绑版本）
+    let soffice = find_libreoffice(app).ok_or_else(|| {
         "未检测到 LibreOffice，请先安装后再使用 Word 输入".to_string()
     })?;
 
@@ -422,16 +495,23 @@ fn convert_word_to_pdf(
     fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("创建缓存目录失败：{e}"))?;
 
+    // 独立 LibreOffice profile，避免多任务并发初始化冲突、污染系统配置
+    let lo_profile = cache_dir.join("lo_profile");
     // 在子线程中执行 LibreOffice，主线程等待 120 秒，避免阻塞 UI 线程。
     // 超时后主线程返回错误；子线程继续运行至命令结束，send 失败被静默忽略。
     let (tx, rx) = mpsc::channel();
     let soffice_clone = soffice.clone();
     let cache_dir_clone = cache_dir.clone();
+    let profile_clone = lo_profile.clone();
     let word_path_clone = word_path.clone();
     thread::spawn(move || {
         let result = Command::new(&soffice_clone)
             .arg("--headless")
             .arg("--norestore")
+            .arg(format!(
+                "-env:UserInstallation=file://{}",
+                urlencode_path(&profile_clone)
+            ))
             .arg("--convert-to")
             .arg("pdf")
             .arg("--outdir")
@@ -463,6 +543,392 @@ fn convert_word_to_pdf(
     }
 
     Ok(pdf_path.to_string_lossy().to_string())
+}
+
+// ─── Word 批量转换（避免逐文件启动 soffice 频繁打开/关闭）───
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WordFileInput {
+    word_path: String,
+    task_id: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WordFileResult {
+    word_path: String,
+    pdf_path: Option<String>,
+    error: Option<String>,
+}
+
+fn is_word_file(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("docx") || e.eq_ignore_ascii_case("doc"))
+        .unwrap_or(false)
+}
+
+// 批量将多个 Word 文件转换为 PDF。同一 task_id 的所有文件合并为一次
+// LibreOffice 无头调用（同 --outdir），避免任务队列中逐文件启动 soffice
+// 导致窗口/进程频繁打开关闭。单个文件失败不影响其余文件。
+#[command]
+async fn convert_word_files_to_pdf(
+    app: tauri::AppHandle,
+    files: Vec<WordFileInput>,
+) -> Result<Vec<WordFileResult>, String> {
+    // 转换含 soffice 子进程等待（最长 120s+），放阻塞线程池执行，避免冻结 UI 线程
+    let results = tauri::async_runtime::spawn_blocking(move || {
+        convert_word_files_to_pdf_sync(&app, files)
+    })
+    .await
+    .map_err(|e| format!("Word 批量转换后台执行失败：{e}"))?;
+    Ok(results)
+}
+
+fn convert_word_files_to_pdf_sync(
+    app: &tauri::AppHandle,
+    files: Vec<WordFileInput>,
+) -> Vec<WordFileResult> {
+    let mut results: Vec<WordFileResult> = Vec::with_capacity(files.len());
+    let soffice = find_libreoffice(app);
+
+    // 按 task_id 分组（记录输入索引以保持返回顺序）
+    let mut groups: HashMap<String, Vec<(usize, &WordFileInput)>> = HashMap::new();
+    for (idx, f) in files.iter().enumerate() {
+        if !is_word_file(&f.word_path) {
+            results.push(WordFileResult {
+                word_path: f.word_path.clone(),
+                pdf_path: None,
+                error: Some(format!("仅支持 .docx / .doc 文件：{}", f.word_path)),
+            });
+            continue;
+        }
+        groups.entry(f.task_id.clone()).or_default().push((idx, f));
+        results.push(WordFileResult {
+            word_path: f.word_path.clone(),
+            pdf_path: None,
+            error: None,
+        });
+    }
+
+    let Some(soffice) = soffice else {
+        for r in &mut results {
+            if r.error.is_none() {
+                r.error = Some("未检测到 LibreOffice，请先安装后再使用 Word 输入".to_string());
+            }
+        }
+        return results;
+    };
+
+    let app_data = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            for r in &mut results {
+                if r.error.is_none() {
+                    r.error = Some(format!("获取应用数据目录失败：{e}"));
+                }
+            }
+            return results;
+        }
+    };
+
+    for (task_id, group) in groups {
+        let cache_dir = app_data.join("word_cache").join(&task_id);
+        if let Err(e) = fs::create_dir_all(&cache_dir) {
+            for (idx, _) in &group {
+                results[*idx].error = Some(format!("创建缓存目录失败：{e}"));
+            }
+            continue;
+        }
+        // 每批使用独立 profile：soffice 进程崩溃或异常退出会污染共享 profile
+        //（锁残留/组件注册损坏），导致同任务后续批次或重试启动即失败。独立
+        // profile 让每次转换互相隔离，崩溃只影响自身。
+        let uniq = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let lo_profile = cache_dir.join(format!("lo_profile_{task_id}_{uniq}"));
+
+        // 记录转换前已有 PDF，用于转换后识别新增输出（soffice 输出名可能
+        // 因特殊字符/长文件名与预期 stem 不一致）
+        let existing: HashSet<String> = fs::read_dir(&cache_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().extension().map(|x| x == "pdf").unwrap_or(false))
+                    .filter_map(|e| e.file_name().to_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // 子进程执行 soffice 转换该组所有文件；主线程轮询退出并做超时保护，
+        // 超时后主动 kill 进程，避免残留 soffice 卡住后续批次
+        let timeout = Duration::from_secs(60 + 20 * group.len() as u64);
+        let word_paths: Vec<String> = group.iter().map(|(_, f)| f.word_path.clone()).collect();
+        let mut cmd = Command::new(&soffice);
+        cmd.arg("--headless")
+            .arg("--norestore")
+            .arg(format!(
+                "-env:UserInstallation=file://{}",
+                urlencode_path(&lo_profile)
+            ))
+            .arg("--convert-to")
+            .arg("pdf")
+            .arg("--outdir")
+            .arg(&cache_dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        for w in &word_paths {
+            cmd.arg(w);
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                for (idx, _) in &group {
+                    results[*idx].error = Some(format!("启动 soffice 失败：{e}"));
+                }
+                continue;
+            }
+        };
+
+        // stderr 由独立线程读取，避免与退出轮询互相阻塞
+        let stderr_reader = child.stderr.take().map(|mut stderr| {
+            thread::spawn(move || {
+                let mut buf = String::new();
+                let _ = stderr.read_to_string(&mut buf);
+                buf
+            })
+        });
+
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(st)) => break Some(st),
+                Ok(None) => {
+                    if start.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                    thread::sleep(Duration::from_millis(200));
+                }
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+            }
+        };
+        let timed_out = status.is_none();
+        let status_ok = status.map(|s| s.success()).unwrap_or(false);
+        let stderr = stderr_reader
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let stderr = stderr.trim().to_string();
+
+        let new_pdfs: Vec<String> = fs::read_dir(&cache_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .filter(|e| e.path().extension().map(|x| x == "pdf").unwrap_or(false))
+                    .filter_map(|e| e.file_name().to_str().map(String::from))
+                    .filter(|n| !existing.contains(n))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut new_pdfs = new_pdfs;
+        // 第一阶段：精准确认已生成的 PDF（所有场景下都判为成功），
+        // 未生成的文件收集到 unmatched，超时场景下再逐个重试，避免被卡住文件连累
+        let mut unmatched: Vec<(usize, &WordFileInput)> = Vec::new();
+        for (idx, f) in group {
+            let stem = Path::new(&f.word_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let expected = format!("{stem}.pdf");
+            if let Some(pos) = new_pdfs.iter().position(|n| n == &expected) {
+                new_pdfs.remove(pos);
+                results[idx].pdf_path = Some(
+                    cache_dir.join(&expected).to_string_lossy().to_string(),
+                );
+            } else {
+                unmatched.push((idx, f));
+            }
+        }
+
+        if unmatched.is_empty() {
+            continue;
+        }
+
+        if !timed_out && status_ok {
+            // 正常完成：兜底认领本次新增 PDF，或报未生成
+            for (idx, _) in &unmatched {
+                if let Some(name) = new_pdfs.first().cloned() {
+                    // 兜底：soffice 输出名与 stem 不一致时，取本次新增的 PDF
+                    new_pdfs.remove(0);
+                    results[*idx].pdf_path = Some(
+                        cache_dir.join(&name).to_string_lossy().to_string(),
+                    );
+                } else {
+                    let detail = if !stderr.is_empty() {
+                        format!("Word 转换未生成 PDF 文件：{stderr}")
+                    } else {
+                        "Word 转换未生成 PDF 文件".to_string()
+                    };
+                    results[*idx].error = Some(detail);
+                }
+            }
+        } else if timed_out {
+            // 超时批：逐个单文件重试（短超时），救回被坏文件连累的好文件
+            let single_timeout = Duration::from_secs(60);
+            for (idx, f) in &unmatched {
+                let word = &f.word_path;
+                if run_soffice_single(
+                    &soffice,
+                    word,
+                    &cache_dir,
+                    single_timeout,
+                ) {
+                    let stem = Path::new(word)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let expected = format!("{stem}.pdf");
+                    if cache_dir.join(&expected).is_file() {
+                        results[*idx].pdf_path = Some(
+                            cache_dir.join(&expected).to_string_lossy().to_string(),
+                        );
+                    } else {
+                        results[*idx].error = Some("LibreOffice 转换超时".to_string());
+                    }
+                } else {
+                    results[*idx].error = Some("LibreOffice 转换超时".to_string());
+                }
+            }
+        } else {
+            // 进程崩溃/非零退出（如某文件触发 UNO 异常拖垮整批 soffice）：
+            // 已生成的 PDF 已在上方认领，对未生成的逐个独立重试，隔离真正坏的
+            // 文件——否则整批好文件都会被误判失败
+            let single_timeout = Duration::from_secs(90);
+            for (idx, f) in &unmatched {
+                let word = &f.word_path;
+                if run_soffice_single(
+                    &soffice,
+                    word,
+                    &cache_dir,
+                    single_timeout,
+                ) {
+                    let stem = Path::new(word)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    let expected = format!("{stem}.pdf");
+                    if cache_dir.join(&expected).is_file() {
+                        results[*idx].pdf_path = Some(
+                            cache_dir.join(&expected).to_string_lossy().to_string(),
+                        );
+                    } else {
+                        results[*idx].error = Some("Word 转换失败，重试后仍未生成 PDF".to_string());
+                    }
+                } else {
+                    let detail = if !stderr.is_empty() {
+                        format!("Word 转换失败（soffice 异常退出）：{stderr}")
+                    } else {
+                        "Word 转换失败（soffice 异常退出）".to_string()
+                    };
+                    results[*idx].error = Some(detail);
+                }
+            }
+        }
+    }
+
+    results
+}
+
+// LibreOffice 的 -env:UserInstallation 需要 URL 编码的路径（file:// 后不能含裸空格等
+// 特殊字符）。路径常含空格（如 ~/Library/Application Support），未编码会让 soffice
+// 启动时抛 UNO RuntimeException 崩溃。按 UTF-8 字节编码，仅保留安全字符与路径分隔符。
+fn urlencode_path(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~'
+            | b'/' => out.push(*b as char),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+// 用单个 Word 文件启动一次 soffice，超时内正常退出返回 true。
+// 是否生成 PDF 由调用方检查缓存目录（输出名可能与 stem 不一致）。
+// 使用独立 profile（主批崩溃后其 profile 可能残留锁/损坏组件，复用会启动失败）。
+fn run_soffice_single(
+    soffice: &Path,
+    word_path: &str,
+    cache_dir: &Path,
+    timeout: Duration,
+) -> bool {
+    let uniq = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let retry_profile = cache_dir.join(format!("lo_retry_{uniq}"));
+    let mut cmd = Command::new(soffice);
+    cmd.arg("--headless")
+        .arg("--norestore")
+        .arg(format!(
+            "-env:UserInstallation=file://{}",
+            urlencode_path(&retry_profile)
+        ))
+        .arg("--convert-to")
+        .arg("pdf")
+        .arg("--outdir")
+        .arg(cache_dir)
+        .arg(word_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    // 读取并丢弃 stderr，避免管道写满阻塞子进程
+    let _drain = child.stderr.take().map(|mut s| {
+        thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = s.read_to_string(&mut buf);
+            buf
+        })
+    });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) => return st.success(),
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 // ─── 日志落盘命令（Task 6）───

@@ -30,7 +30,7 @@ import type { PageProcessor, PageProcessContext } from "./pageProcessor";
 import { logger } from "./logger";
 import { useTaskStore } from "../store/useTaskStore";
 import { isWordPath } from "./inputValidation";
-import { convertWordToPdf } from "./wordConverter";
+import { convertWordFilesToPdf } from "./wordConverter";
 import { TaskController } from "./taskController";
 import {
   saveBreakpoint,
@@ -46,6 +46,7 @@ import {
 import {
   renderLayoutPageToCanvas,
   canvasToJpegBlob,
+  MAX_ITEMS_PER_PAGE,
 } from "./materialList/imageRenderer";
 import type { FolderTreeNode } from "../types/materialList";
 import { invoke } from "@tauri-apps/api/core";
@@ -144,6 +145,9 @@ async function generateMaterialListImages(
 ): Promise<void> {
   logger.taskInfo(task.taskId, `开始生成资料列表展示图`);
 
+  // 资料列表图片统一输出到 {taskOutputDir}/资料列表/ 子文件夹。
+  const materialListDir = joinPath(taskOutputDir, "资料列表");
+
   for (const folderPath of task.sourcePaths) {
     let root: FolderTreeNode;
     try {
@@ -164,20 +168,23 @@ async function generateMaterialListImages(
     let totalPages = 0;
     for (const dir of dirsToRender) {
       const sorted = sortDirectoryChildren(dir.children);
-      totalPages += paginateChildren(sorted).length;
+      totalPages += paginateChildren(sorted, MAX_ITEMS_PER_PAGE).length;
     }
+
+    // 确保子文件夹存在（write_image_file 要求父目录已存在）。
+    await invoke<void>("ensure_output_dir", { path: materialListDir });
 
     let currentIndex = 0;
     for (const dir of dirsToRender) {
       try {
         const sorted = sortDirectoryChildren(dir.children);
-        const pages = paginateChildren(sorted);
+        const pages = paginateChildren(sorted, MAX_ITEMS_PER_PAGE);
         for (const page of pages) {
           const canvas = await renderLayoutPageToCanvas(page);
           const blob = await canvasToJpegBlob(canvas);
           const bytes = new Uint8Array(await blob.arrayBuffer());
           const filename = formatImageFilename(currentIndex, totalPages);
-          const outputPath = joinPath(taskOutputDir, filename);
+          const outputPath = joinPath(materialListDir, filename);
           await invoke<void>("write_image_file", {
             path: outputPath,
             bytes: Array.from(bytes),
@@ -280,59 +287,106 @@ export async function runTask(
     }
 
     if (!hasFatalError) {
-      for (const inputPath of inputPaths) {
-        if (!isWordPath(inputPath)) {
-          resolvedPdfs.push({ pdfPath: inputPath, originalPath: inputPath });
-          pdfPaths.push(inputPath);
-          breakpointPdfs.push({
-            originalPath: inputPath,
-            resolvedPdfPath: inputPath,
-            completed: false,
-            pageResults: [],
-          });
-          continue;
-        }
-        // Word 文件：调用 LibreOffice 转 PDF。
-        try {
-          const convertedPdf = await convertWordToPdf(inputPath, task.taskId);
-          logger.taskInfo(
-            task.taskId,
-            `Word 转换完成：${basename(inputPath)} → ${basename(convertedPdf)}`
-          );
-          resolvedPdfs.push({ pdfPath: convertedPdf, originalPath: inputPath });
-          pdfPaths.push(convertedPdf);
-          breakpointPdfs.push({
-            originalPath: inputPath,
-            resolvedPdfPath: convertedPdf,
-            completed: false,
-            pageResults: [],
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.taskError(task.taskId, `Word 转换失败：${basename(inputPath)} - ${msg}`);
-          pageResults.push({
-            taskId: task.taskId,
-            pdfPath: inputPath,
-            pageNumber: 0,
-            status: "failed",
-            errorMessage: `Word 转换失败：${msg}`,
-          });
-          // Word 转换失败也记入断点（标记为已完成，恢复时跳过不重试）
-          breakpointPdfs.push({
-            originalPath: inputPath,
-            resolvedPdfPath: "",
-            completed: true,
-            pageResults: [
-              {
+      const wordInputs = inputPaths.filter((p) => isWordPath(p));
+      const pdfInputs = inputPaths.filter((p) => !isWordPath(p));
+
+      // PDF 直接入列
+      for (const inputPath of pdfInputs) {
+        resolvedPdfs.push({ pdfPath: inputPath, originalPath: inputPath });
+        pdfPaths.push(inputPath);
+        breakpointPdfs.push({
+          originalPath: inputPath,
+          resolvedPdfPath: inputPath,
+          completed: false,
+          pageResults: [],
+        });
+      }
+
+      // Word 文件分批转换：每批一次 LibreOffice 调用（避免逐文件启动 soffice），
+      // 分批让进度可见、单个坏文件卡住只影响所在批。单文件失败仅记录，不影响其余。
+      if (wordInputs.length > 0) {
+        const BATCH = 6;
+        logger.taskInfo(task.taskId, `开始转换 ${wordInputs.length} 个 Word 文件…`);
+        let processed = 0;
+        for (let start = 0; start < wordInputs.length; start += BATCH) {
+          const batch = wordInputs.slice(start, start + BATCH);
+          try {
+            const results = await convertWordFilesToPdf(batch, task.taskId);
+            processed += batch.length;
+            logger.taskInfo(
+              task.taskId,
+              `Word 转换进度 ${Math.min(processed, wordInputs.length)}/${wordInputs.length}`
+            );
+            for (const r of results) {
+              if (r.pdfPath) {
+                logger.taskInfo(
+                  task.taskId,
+                  `Word 转换完成：${basename(r.wordPath)} → ${basename(r.pdfPath)}`
+                );
+                resolvedPdfs.push({ pdfPath: r.pdfPath, originalPath: r.wordPath });
+                pdfPaths.push(r.pdfPath);
+                breakpointPdfs.push({
+                  originalPath: r.wordPath,
+                  resolvedPdfPath: r.pdfPath,
+                  completed: false,
+                  pageResults: [],
+                });
+              } else {
+                const msg = r.error ?? "未知错误";
+                logger.taskError(task.taskId, `Word 转换失败：${basename(r.wordPath)} - ${msg}`);
+                pageResults.push({
+                  taskId: task.taskId,
+                  pdfPath: r.wordPath,
+                  pageNumber: 0,
+                  status: "failed",
+                  errorMessage: `Word 转换失败：${msg}`,
+                });
+                // Word 转换失败也记入断点（标记为已完成，恢复时跳过不重试）
+                breakpointPdfs.push({
+                  originalPath: r.wordPath,
+                  resolvedPdfPath: "",
+                  completed: true,
+                  pageResults: [
+                    {
+                      taskId: task.taskId,
+                      pdfPath: r.wordPath,
+                      pageNumber: 0,
+                      status: "failed",
+                      errorMessage: `Word 转换失败：${msg}`,
+                    },
+                  ],
+                });
+              }
+            }
+          } catch (err) {
+            // 该批整体失败（如超时/后台异常）：批内所有 Word 记失败，不中断
+            processed += batch.length;
+            const msg = err instanceof Error ? err.message : String(err);
+            for (const inputPath of batch) {
+              logger.taskError(task.taskId, `Word 转换失败：${basename(inputPath)} - ${msg}`);
+              pageResults.push({
                 taskId: task.taskId,
                 pdfPath: inputPath,
                 pageNumber: 0,
                 status: "failed",
                 errorMessage: `Word 转换失败：${msg}`,
-              },
-            ],
-          });
-          // 不中断，继续下一个文件
+              });
+              breakpointPdfs.push({
+                originalPath: inputPath,
+                resolvedPdfPath: "",
+                completed: true,
+                pageResults: [
+                  {
+                    taskId: task.taskId,
+                    pdfPath: inputPath,
+                    pageNumber: 0,
+                    status: "failed",
+                    errorMessage: `Word 转换失败：${msg}`,
+                  },
+                ],
+              });
+            }
+          }
         }
       }
     }
@@ -417,6 +471,9 @@ export async function runTask(
         });
       }
     }
+
+    // 预扫描完成，把要处理的页数写回队列任务，供"页数"列展示。
+    useTaskStore.getState().updateTaskPages(task.taskId, stagePdfPages);
 
     // 设置阶段初始进度。
     const initSuccess = pageResults.filter((r) => r.status === "success").length;
@@ -618,12 +675,17 @@ export async function runTask(
     try {
       const allTemplates = await listTemplates();
       const calibrated = allTemplates.filter((t) => t.calibrated);
-      if (calibrated.length === 0) {
+      // 指定了模板则只用选中的，否则用全部已标定；选中项若已删除则回退全部。
+      const selected = task.backgroundTemplateIds?.length
+        ? calibrated.filter((t) => task.backgroundTemplateIds!.includes(t.id))
+        : calibrated;
+      const backgrounds = selected.length > 0 ? selected : calibrated;
+      if (backgrounds.length === 0) {
         logger.taskWarn(task.taskId, "无已标定的背景模板，跳过仿打印");
       } else {
         logger.taskInfo(
           task.taskId,
-          `开始仿打印合成（${calibrated.length} 个背景模板）`,
+          `开始仿打印合成（${backgrounds.length} 个背景模板）`,
         );
         const curCompleted = useTaskStore.getState().progress?.completedStages ?? [];
         useTaskStore.getState().setProgress({
@@ -636,7 +698,7 @@ export async function runTask(
         });
         const count = await generatePrintImages(
           taskOutputDir,
-          calibrated,
+          backgrounds,
           (done, total) => {
             const prevCompleted = useTaskStore.getState().progress?.completedStages ?? [];
             useTaskStore.getState().setProgress({

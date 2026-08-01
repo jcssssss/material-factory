@@ -41,11 +41,11 @@ export default function WorkbenchPage() {
   const hasWordInQueue = queue.some(
     (t) => t.sourceType === "files" && t.sourcePaths.some((p) => isWordPath(p))
   );
-  const mayHaveWord = queue.some(
-    (t) => t.sourceType === "folder" || t.sourcePaths.some((p) => isWordPath(p))
-  );
+  const hasFolderInQueue = queue.some((t) => t.sourceType === "folder");
   const libreOfficeMissing = libreOffice !== null && !libreOffice.available;
-  const blockStart = libreOfficeMissing && mayHaveWord;
+  // 仅当队列中明确含 Word 文件时阻止启动；文件夹内容运行时扫描，
+  // 其中若含 Word 文件由逐文件失败隔离处理，纯 PDF 不受影响。
+  const blockStart = libreOfficeMissing && hasWordInQueue;
 
   async function handleStart() {
     if (isRunning) return;
@@ -84,13 +84,13 @@ export default function WorkbenchPage() {
   return (
     <div className="flex h-full flex-col gap-3 p-4">
       {/* LibreOffice 警告 */}
-      {libreOfficeMissing && mayHaveWord ? (
+      {libreOfficeMissing && (hasWordInQueue || hasFolderInQueue) ? (
         <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-800">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
           <span>
             {hasWordInQueue
               ? "未检测到 LibreOffice。含 Word 文件的任务无法启动，请先安装 LibreOffice 后重启应用。纯 PDF 任务不受影响。"
-              : "未检测到 LibreOffice。文件夹任务可能包含 Word 文件，将无法启动。请先安装 LibreOffice 后重启应用。纯 PDF 任务不受影响。"}
+              : "未检测到 LibreOffice。文件夹中若包含 Word 文件，对应文件将转换失败；纯 PDF 任务可正常启动。如需 Word 支持，请安装 LibreOffice 后重启应用。"}
           </span>
         </div>
       ) : null}

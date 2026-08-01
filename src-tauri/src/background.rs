@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, Manager, State};
-use tauri::ipc::Response;
+use tauri::ipc::{InvokeBody, Request, Response};
 
 const OUTPUT_W: u32 = 1242;
 const OUTPUT_H: u32 = 1656;
@@ -29,14 +29,21 @@ fn thumbnail_file_name(original: &str) -> String {
 
 const THUMBNAIL_MAX_DIM: u32 = 600;
 
-fn generate_thumbnail_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
-    let img = image::load_from_memory(bytes).ok()?;
+// 从已解码的图片生成最长边 THUMBNAIL_MAX_DIM 的 JPEG 缩略图。
+// 复用解码结果，避免对已编码的主图再次全量解码。
+fn make_thumbnail_from_image(img: &image::DynamicImage) -> Option<Vec<u8>> {
     let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
     let (nw, nh) = if w > h {
         (THUMBNAIL_MAX_DIM, (h as f64 * THUMBNAIL_MAX_DIM as f64 / w as f64).round() as u32)
     } else {
         ((w as f64 * THUMBNAIL_MAX_DIM as f64 / h as f64).round() as u32, THUMBNAIL_MAX_DIM)
     };
+    if nw == 0 || nh == 0 {
+        return None;
+    }
     let thumb = img.resize_exact(nw, nh, FilterType::Lanczos3);
     let mut buf: Vec<u8> = Vec::new();
     thumb
@@ -45,11 +52,10 @@ fn generate_thumbnail_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-fn save_thumbnail(dir: &std::path::Path, original_name: &str, bytes: &[u8]) {
-    let thumb_name = thumbnail_file_name(original_name);
-    if let Some(thumb_bytes) = generate_thumbnail_bytes(bytes) {
-        let _ = fs::write(dir.join(&thumb_name), &thumb_bytes);
-    }
+// 从原始字节生成缩略图（用于补齐历史模板缺失的缩略图）。
+fn generate_thumbnail_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(bytes).ok()?;
+    make_thumbnail_from_image(&img)
 }
 
 fn backgrounds_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -67,9 +73,17 @@ fn generate_background_id() -> String {
     format!("bg_{}", duration.as_nanos())
 }
 
-/// 将任意尺寸的背景图片处理为 1242×1656 JPG。
+// 处理结果：主图字节 + 尺寸 + 缩略图字节（基于同一次解码生成，避免二次解码）。
+struct ProcessedBackground {
+    bytes: Vec<u8>,
+    width: u32,
+    height: u32,
+    thumb: Option<Vec<u8>>,
+}
+
+/// 将任意尺寸的背景图片处理为 1242×1656 JPG，并基于同一次解码生成缩略图。
 /// 3:4 图片直接缩放；其他比例等比缩放后居中放置，白底补齐。
-fn process_background_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+fn process_background_image(bytes: &[u8]) -> Result<ProcessedBackground, String> {
     let img = image::load_from_memory(bytes)
         .map_err(|e| format!("解码图片失败：{e}"))?;
     let (w, h) = (img.width(), img.height());
@@ -98,27 +112,60 @@ fn process_background_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String>
     encoder
         .encode(processed.as_bytes(), OUTPUT_W, OUTPUT_H, processed.color())
         .map_err(|e| format!("JPEG 编码失败：{e}"))?;
-    Ok((buf, OUTPUT_W, OUTPUT_H))
+
+    let thumb = make_thumbnail_from_image(&img);
+
+    Ok(ProcessedBackground {
+        bytes: buf,
+        width: OUTPUT_W,
+        height: OUTPUT_H,
+        thumb,
+    })
 }
 
 #[command]
-pub fn save_background_file(
+pub async fn save_background_file(
     app: AppHandle,
-    bytes: Vec<u8>,
-    _ext: String,
+    request: Request<'_>,
 ) -> Result<SaveBackgroundResult, String> {
-    let dir = backgrounds_dir(&app)?;
+    // 前端以 invoke 顶层传 Uint8Array 走 octet-stream 二进制 body（零 JSON 序列化）。
+    let bytes: Vec<u8> = match request.body() {
+        InvokeBody::Raw(v) => v.clone(),
+        InvokeBody::Json(_) => {
+            return Err(
+                "save_background_file 需要 octet-stream 二进制 body，请用 invoke 顶层传 Uint8Array"
+                    .to_string(),
+            );
+        }
+    };
+    // 图片解码/缩放/编码较重，放到阻塞线程池执行，避免冻结 UI 线程。
+    tauri::async_runtime::spawn_blocking(move || save_background_file_sync(&app, bytes))
+        .await
+        .map_err(|e| format!("后台处理失败：{e}"))?
+}
+
+fn save_background_file_sync(
+    app: &AppHandle,
+    bytes: Vec<u8>,
+) -> Result<SaveBackgroundResult, String> {
+    let dir = backgrounds_dir(app)?;
     fs::create_dir_all(&dir).map_err(|e| format!("创建背景目录失败：{e}"))?;
 
     let file_id = generate_background_id();
     let file_name = format!("{file_id}.jpg");
     let file_path = dir.join(&file_name);
 
-    let (processed_bytes, width, height) = process_background_image(&bytes)?;
-    fs::write(&file_path, &processed_bytes).map_err(|e| format!("写入背景文件失败：{e}"))?;
-    save_thumbnail(&dir, &file_name, &processed_bytes);
+    let processed = process_background_image(&bytes)?;
+    fs::write(&file_path, &processed.bytes).map_err(|e| format!("写入背景文件失败：{e}"))?;
+    if let Some(thumb_bytes) = processed.thumb {
+        let _ = fs::write(dir.join(thumbnail_file_name(&file_name)), &thumb_bytes);
+    }
 
-    Ok(SaveBackgroundResult { file_name, width, height })
+    Ok(SaveBackgroundResult {
+        file_name,
+        width: processed.width,
+        height: processed.height,
+    })
 }
 
 #[command]
@@ -156,32 +203,38 @@ pub fn read_background_thumbnail(
 }
 
 /// 批量补齐所有缺失的缩略图，返回实际生成的缩略图数量。
+/// 异步 + spawn_blocking：生成过程在线程池执行，不阻塞 UI 线程。
 #[command]
-pub fn ensure_background_thumbnails(
+pub async fn ensure_background_thumbnails(
     app: AppHandle,
     db: State<'_, Database>,
 ) -> Result<usize, String> {
     let dir = backgrounds_dir(&app)?;
     let templates = db.list_backgrounds()?;
-    let mut generated = 0usize;
 
-    for t in &templates {
-        let thumb_path = dir.join(thumbnail_file_name(&t.file_name));
-        if thumb_path.exists() {
-            continue;
-        }
-        let orig_path = dir.join(&t.file_name);
-        let orig_bytes = match fs::read(&orig_path) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if let Some(thumb_bytes) = generate_thumbnail_bytes(&orig_bytes) {
-            let _ = fs::write(&thumb_path, &thumb_bytes);
-            generated += 1;
-        }
-    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut generated = 0usize;
 
-    Ok(generated)
+        for t in &templates {
+            let thumb_path = dir.join(thumbnail_file_name(&t.file_name));
+            if thumb_path.exists() {
+                continue;
+            }
+            let orig_path = dir.join(&t.file_name);
+            let orig_bytes = match fs::read(&orig_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if let Some(thumb_bytes) = generate_thumbnail_bytes(&orig_bytes) {
+                let _ = fs::write(&thumb_path, &thumb_bytes);
+                generated += 1;
+            }
+        }
+
+        Ok(generated)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[command]

@@ -1,7 +1,9 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useTaskStore } from "../store/useTaskStore";
 import { EmptyState } from "../components/common/EmptyState";
 import { StatusBadge } from "../components/common/StatusBadge";
+import InfiniteScrollSentinel from "../components/common/InfiniteScrollSentinel";
+import { useInfiniteScroll } from "../lib/useInfiniteScroll";
 import type { HistoryTask } from "../types/task";
 import { cn } from "@/lib/utils";
 
@@ -18,17 +20,21 @@ export default function HistoryPage() {
     } catch { /* ignore */ }
   }, []);
 
-  const completedInQueue: HistoryTask[] = queue
-    .filter(
-      (t) =>
-        t.status === "completed" ||
-        t.status === "completed_with_errors" ||
-        t.status === "failed"
-    )
-    .filter((t) => !history.some((h) => h.config.taskId === t.taskId))
-    .map((config) => ({ config }));
+  const rows = useMemo<HistoryTask[]>(() => {
+    const completedInQueue: HistoryTask[] = queue
+      .filter(
+        (t) =>
+          t.status === "completed" ||
+          t.status === "completed_with_errors" ||
+          t.status === "failed"
+      )
+      .filter((t) => !history.some((h) => h.config.taskId === t.taskId))
+      .map((config) => ({ config }));
+    return [...history, ...completedInQueue];
+  }, [history, queue]);
 
-  const rows: HistoryTask[] = [...history, ...completedInQueue];
+  const { visibleItems: visibleRows, hasMore, sentinelRef } =
+    useInfiniteScroll(rows, 20);
 
   return (
     <div className="flex h-full flex-col gap-4 p-4">
@@ -63,7 +69,7 @@ export default function HistoryPage() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((row) => {
+              {visibleRows.map((row) => {
                 const cfg = row.config;
                 const sum = row.summary;
                 return (
@@ -125,6 +131,7 @@ export default function HistoryPage() {
               })}
             </tbody>
           </table>
+          <InfiniteScrollSentinel ref={sentinelRef} hasMore={hasMore} />
         </div>
       )}
     </div>

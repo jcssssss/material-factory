@@ -7,6 +7,7 @@ type Props = {
   onToggleSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onClick: (id: string) => void;
+  selectMode?: boolean;
 };
 
 export default function TemplateGrid({
@@ -15,6 +16,7 @@ export default function TemplateGrid({
   onToggleSelect,
   onDelete,
   onClick,
+  selectMode = false,
 }: Props) {
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
@@ -26,6 +28,7 @@ export default function TemplateGrid({
           onToggleSelect={onToggleSelect}
           onDelete={onDelete}
           onClick={onClick}
+          selectMode={selectMode}
         />
       ))}
     </div>

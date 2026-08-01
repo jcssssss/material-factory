@@ -35,6 +35,12 @@ export type TaskConfig = {
   // 透视贴合 A4 纸 + Multiply 正片叠底 + 随机匹配背景模板。
   // 需要至少一个已标定的背景模板才能生效。
   generatePrintImages?: boolean;
+  // v1.4.0：指定的背景模板 id 列表（可选）。
+  // 为空时使用全部已标定模板随机轮换；指定后仅使用这些模板合成。
+  backgroundTemplateIds?: string[];
+  // 任务要处理的页数（按页码规则过滤后的 selectedPages 之和）。
+  // 由 taskRunner 预扫描阶段写回，供任务队列"页数"列展示。
+  totalPages?: number;
 };
 
 // PDF 工作项执行状态。

@@ -175,9 +175,26 @@ export function embedJfif300Dpi(jpegBytes: Uint8Array): Uint8Array {
 export async function exportPageAsJpegBytes(
   sourceCanvas: HTMLCanvasElement
 ): Promise<Uint8Array> {
-  const targetCanvas = composeToPortraitCanvas(sourceCanvas);
+  // Tauri WebView 在长任务/高内存下偶发 getContext 返回 null，重试防御。
+  let targetCanvas: HTMLCanvasElement | null = null;
+  for (let attempt = 0; attempt < 3 && !targetCanvas; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+    try {
+      targetCanvas = composeToPortraitCanvas(sourceCanvas);
+    } catch {
+      targetCanvas = null;
+    }
+  }
+  if (!targetCanvas) {
+    throw new Error("无法获取目标 Canvas 2D 上下文");
+  }
   const blob = await canvasToJpegBlob(targetCanvas);
   const rawBytes = new Uint8Array(await blob.arrayBuffer());
+  // 释放目标 canvas 显存（2475×3300 大画布），避免逐页累积耗尽 WebView GPU 显存。
+  targetCanvas.width = 0;
+  targetCanvas.height = 0;
   return embedJfif300Dpi(rawBytes);
 }
 

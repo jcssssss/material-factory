@@ -47,14 +47,20 @@ export async function readPdfBytes(pdfPath: string): Promise<Uint8Array> {
 }
 
 // 加载 PDF 文档。调用方负责在用完后调用 doc.destroy()。
+//
+// stopAtErrors=false（pdf.js 默认）：内容流中的局部错误（如畸形 ExtGState、
+// 缺失 CMap）会被忽略并跳过对应元素，页面其余内容照常渲染。
+// 之前设为 true 会在这类可恢复错误处直接中止整页解析，导致页面渲染成空白
+// （实测 00041《基础会计学》章节练习题.pdf 第 1 页因此变成 0 个绘制操作）。
+// 真正的致命错误（文件损坏、加密）仍会在后续 getPage/render 阶段抛出，
+// 由 taskRunner 的三级失败隔离捕获。
 export async function loadPdfDocument(
   bytes: Uint8Array
 ): Promise<PDFDocumentProxy> {
   ensureWorker();
-  // stopAtErrors=true: 解析失败时直接抛出，让 taskRunner 走 PDF 级失败隔离。
   const loadingTask = getDocument({
     data: bytes,
-    stopAtErrors: true,
+    stopAtErrors: false,
     disableFontFace: false,
   });
   // 超时检测：worker 通信卡住时 30 秒后抛错。
@@ -95,7 +101,14 @@ export async function renderPageToCanvas(
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
 
-  const ctx = canvas.getContext("2d");
+  // Tauri WebView 在长任务/高内存下偶发 getContext 返回 null，重试新建 canvas 防御。
+  let ctx: CanvasRenderingContext2D | null = null;
+  for (let attempt = 0; attempt < 3 && !ctx; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+    ctx = canvas.getContext("2d");
+  }
   if (!ctx) {
     await page.cleanup();
     throw new Error("无法获取 2D Canvas 上下文");
@@ -118,6 +131,34 @@ export async function renderPageToCanvas(
   await Promise.race([renderTask.promise, timeout]);
 
   return { canvas, viewport, page };
+}
+
+// 判定 Canvas 渲染结果是否接近空白（纯白）。
+//
+// 思路：把源 canvas 缩略绘制到小画布（64×64）后采样像素，统计非白像素占比。
+// 缩略采样既控制开销（全尺寸 getImageData 对 300 DPI 大画布是 MB 级内存），
+// 也能容忍单个像素级噪声。占比 < 0.5% 视为空白。
+//
+// 用途：PDF 页面渲染后检查是否整页空白（纯白底），用于在日志中提示"疑似空白
+// 页"，帮助区分合法空白页与渲染异常。仅作诊断，不触发重渲染。
+export function isCanvasBlank(canvas: HTMLCanvasElement): boolean {
+  const SAMPLE_W = 64;
+  const SAMPLE_H = 64;
+  const sample = document.createElement("canvas");
+  sample.width = SAMPLE_W;
+  sample.height = SAMPLE_H;
+  const ctx = sample.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return false; // 拿不到上下文时保守判定为非空白，避免误触发回退
+  ctx.drawImage(canvas, 0, 0, SAMPLE_W, SAMPLE_H);
+  const data = ctx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data;
+  let nonWhite = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    // 三个通道都接近 255 视为白；任一通道明显偏暗即为有内容。
+    if (data[i] < 245 || data[i + 1] < 245 || data[i + 2] < 245) {
+      nonWhite += 1;
+    }
+  }
+  return nonWhite / (data.length / 4) < 0.005;
 }
 
 // 销毁 PDF 文档，释放 worker 资源。

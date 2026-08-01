@@ -194,7 +194,7 @@ export function TaskProgressPanel() {
           {recentLogs.slice().reverse().map((log, idx) => (
             <li key={idx} className="flex items-center gap-1.5 truncate py-0.5 font-mono text-muted-foreground" title={log.message}>
               <span className="shrink-0 text-muted-foreground/50">
-                {log.timestamp.slice(11, 19)}
+                {log.timestamp}
               </span>
               {log.message}
             </li>

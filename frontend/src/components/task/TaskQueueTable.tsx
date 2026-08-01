@@ -95,7 +95,7 @@ export function TaskQueueTable({ onStart, blockStart, isRunning, hasPending }: {
                 <th className="w-24 px-4 py-3 font-medium">任务 ID</th>
                 <th className="px-4 py-3 font-medium">任务名</th>
                 <th className="px-4 py-3 font-medium">来源</th>
-                <th className="px-4 py-3 font-medium">PDF 数</th>
+                <th className="px-4 py-3 font-medium">页数</th>
                 <th className="px-4 py-3 font-medium">页码规则</th>
                 <th className="px-4 py-3 font-medium">状态</th>
                 <th className="px-4 py-3 font-medium">操作</th>
@@ -137,7 +137,7 @@ export function TaskQueueTable({ onStart, blockStart, isRunning, hasPending }: {
                     {task.sourceType === "folder" ? "文件夹" : "文件"}
                   </td>
                   <td className="px-4 py-3 text-muted-foreground">
-                    {task.sourceType === "folder" ? "—" : task.sourcePaths.length}
+                    {task.totalPages ?? "—"}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                     {formatPageRule(task)}

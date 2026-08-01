@@ -36,3 +36,21 @@ export async function convertWordToPdf(
     taskId,
   });
 }
+
+export type WordFileResult = {
+  wordPath: string;
+  pdfPath: string | null;
+  error: string | null;
+};
+
+// 批量将多个 Word 文件转换为 PDF。
+// 同一任务的所有 Word 合并为一次 LibreOffice 调用（避免逐文件启动 soffice），
+// 返回按输入顺序的结果，单文件失败不影响其余。
+export async function convertWordFilesToPdf(
+  files: string[],
+  taskId: string
+): Promise<WordFileResult[]> {
+  return await invoke<WordFileResult[]>("convert_word_files_to_pdf", {
+    files: files.map((wordPath) => ({ wordPath, taskId })),
+  });
+}

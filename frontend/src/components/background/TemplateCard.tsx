@@ -8,6 +8,7 @@ type Props = {
   onToggleSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onClick: (id: string) => void;
+  selectMode?: boolean;
 };
 
 export default function TemplateCard({
@@ -16,6 +17,7 @@ export default function TemplateCard({
   onToggleSelect,
   onDelete,
   onClick,
+  selectMode = false,
 }: Props) {
   const [thumbUrl, setThumbUrl] = useState<string | null>(null);
   const [imgError, setImgError] = useState(false);
@@ -23,7 +25,11 @@ export default function TemplateCard({
 
   useEffect(() => {
     let cancelled = false;
-    void (async () => {
+    let timer: number | undefined;
+    let attempts = 0;
+    const MAX_ATTEMPTS = 15;
+
+    const load = async () => {
       try {
         const buffer = await readBackgroundThumbnail(template.file_name);
         if (cancelled) return;
@@ -36,11 +42,21 @@ export default function TemplateCard({
         thumbUrlRef.current = url;
         setThumbUrl(url);
       } catch {
-        if (!cancelled) setImgError(true);
+        if (cancelled) return;
+        attempts += 1;
+        if (attempts < MAX_ATTEMPTS) {
+          // 缩略图可能仍在后台生成中，稍后重试自动显示
+          timer = window.setTimeout(load, 300);
+        } else {
+          setImgError(true);
+        }
       }
-    })();
+    };
+    void load();
+
     return () => {
       cancelled = true;
+      if (timer) window.clearTimeout(timer);
       if (thumbUrlRef.current) {
         URL.revokeObjectURL(thumbUrlRef.current);
         thumbUrlRef.current = null;
@@ -53,15 +69,28 @@ export default function TemplateCard({
       ? `${(template.file_size / 1024).toFixed(0)} KB`
       : `${(template.file_size / (1024 * 1024)).toFixed(1)} MB`;
 
+  // 选择模式下：未标定的模板不可选（置灰）
+  const disabled = selectMode && !template.calibrated;
+
   return (
     <div
       className={
-        "group relative cursor-pointer overflow-hidden rounded-xl border bg-workspace-surface shadow-card transition-all hover:shadow-lg " +
+        "group relative overflow-hidden rounded-xl border bg-workspace-surface shadow-card transition-all " +
+        (disabled
+          ? "cursor-not-allowed opacity-50"
+          : "cursor-pointer hover:shadow-lg ") +
         (selected
           ? "border-workspace-accent ring-2 ring-workspace-accent/30"
           : "border-workspace-border/60")
       }
-      onClick={() => onClick(template.id)}
+      onClick={() => {
+        if (selectMode) {
+          // 选择模式：点击已标定模板单选；未标定忽略
+          if (template.calibrated) onToggleSelect(template.id);
+        } else {
+          onClick(template.id);
+        }
+      }}
     >
       <div className="aspect-[4/3] overflow-hidden bg-slate-100 p-2">
         {thumbUrl && !imgError ? (
@@ -69,6 +98,8 @@ export default function TemplateCard({
             src={thumbUrl}
             alt={template.file_name}
             className="h-full w-full object-contain"
+            loading="lazy"
+            decoding="async"
             onError={() => setImgError(true)}
           />
         ) : (
@@ -117,36 +148,38 @@ export default function TemplateCard({
         </div>
       </div>
 
-      <div
-        className="absolute inset-x-0 top-0 flex items-center justify-between p-2 opacity-0 transition-opacity group-hover:opacity-100"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => onToggleSelect(template.id)}
-          className="h-4 w-4 rounded border-workspace-border text-workspace-accent focus:ring-workspace-accent"
-        />
-        <button
-          type="button"
-          onClick={() => onDelete(template.id)}
-          className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-red-500 shadow-sm transition hover:bg-red-50"
-          title="删除"
+      {!selectMode && (
+        <div
+          className="absolute inset-x-0 top-0 flex items-center justify-between p-2 opacity-0 transition-opacity group-hover:opacity-100"
+          onClick={(e) => e.stopPropagation()}
         >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 20 20"
-            fill="currentColor"
-            className="h-3.5 w-3.5"
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={() => onToggleSelect(template.id)}
+            className="h-4 w-4 rounded border-workspace-border text-workspace-accent focus:ring-workspace-accent"
+          />
+          <button
+            type="button"
+            onClick={() => onDelete(template.id)}
+            className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-red-500 shadow-sm transition hover:bg-red-50"
+            title="删除"
           >
-            <path
-              fillRule="evenodd"
-              d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z"
-              clipRule="evenodd"
-            />
-          </svg>
-        </button>
-      </div>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 20 20"
+              fill="currentColor"
+              className="h-3.5 w-3.5"
+            >
+              <path
+                fillRule="evenodd"
+                d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

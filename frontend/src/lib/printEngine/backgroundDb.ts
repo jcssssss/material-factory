@@ -42,12 +42,15 @@ export async function saveCalibration(
   return invoke<void>("save_calibration", { id, corners });
 }
 
-/** 上传并处理为 1242×1656 JPEG。返回最终文件名和尺寸。 */
+/** 上传并处理为 1242×1656 JPEG。字节走二进制通道（octet-stream，顶层 Uint8Array），
+ * 避免嵌套 JSON 序列化大字节。返回最终文件名和尺寸。 */
 export async function saveBackgroundFile(
   bytes: Uint8Array,
-  ext: string,
 ): Promise<{ file_name: string; width: number; height: number }> {
-  return invoke<{ file_name: string; width: number; height: number }>("save_background_file", { bytes, ext });
+  return invoke<{ file_name: string; width: number; height: number }>(
+    "save_background_file",
+    bytes,
+  );
 }
 
 export function getBackgroundFilePath(file_name: string): Promise<string> {

@@ -28,6 +28,8 @@ vi.mock("../pdf", () => ({
   loadPdfDocument: (...args: unknown[]) => loadPdfDocumentMock(...args),
   renderPageToCanvas: (...args: unknown[]) => renderPageToCanvasMock(...args),
   destroyPdfDocument: (...args: unknown[]) => destroyPdfDocumentMock(...args),
+  // 本文件聚焦异常分类，空白页回退逻辑由 pdfBlank.test.ts 覆盖。
+  isCanvasBlank: () => false,
 }));
 
 // Mock ./exportImage 模块。

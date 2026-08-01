@@ -3,6 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { useTaskStore } from "../store/useTaskStore";
 import { EmptyState } from "../components/common/EmptyState";
 import { ToneBadge } from "../components/common/StatusBadge";
+import InfiniteScrollSentinel from "../components/common/InfiniteScrollSentinel";
+import { useInfiniteScroll } from "../lib/useInfiniteScroll";
 import type { LogLevel, LogScope } from "../types/task";
 
 const LEVEL_TONE: Record<LogLevel, "muted" | "success" | "warning" | "danger"> = {
@@ -51,6 +53,9 @@ export default function LogViewerPage() {
     for (const l of logs) c[l.level] += 1;
     return c;
   }, [logs]);
+
+  const { visibleItems: visibleLogs, hasMore, sentinelRef } =
+    useInfiniteScroll(filtered, 50);
 
   return (
     <div className="flex h-full flex-col gap-4 p-4">
@@ -134,34 +139,52 @@ export default function LogViewerPage() {
             />
           </div>
         ) : (
-          <ul className="h-full divide-y divide-border/40 overflow-auto">
-            {filtered.map((log, idx) => (
-              <li key={idx} className="flex items-start gap-3 px-4 py-2.5 text-xs transition-colors hover:bg-muted/30">
-                <span className="mt-0.5 shrink-0 font-mono text-muted-foreground">
-                  {log.timestamp.slice(11, 19)}
-                </span>
-                <ToneBadge tone={LEVEL_TONE[log.level]}>
-                  {log.level.toUpperCase()}
-                </ToneBadge>
-                <span className="shrink-0 text-muted-foreground">
-                  {SCOPE_LABEL[log.scope]}
-                </span>
-                {log.taskId && (
-                  <button
-                    type="button"
-                    onClick={() => copyTaskId(log.taskId!)}
-                    className="shrink-0 font-mono text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors"
-                    title="点击复制任务 ID"
-                  >
-                    {copiedId === log.taskId ? "已复制" : `${log.taskId.slice(0, 8)}…`}
-                  </button>
-                )}
-                <span className="min-w-0 flex-1 break-words font-mono text-foreground/80">
-                  {log.message}
-                </span>
-              </li>
-            ))}
-          </ul>
+          <div className="h-full overflow-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="sticky top-0 z-10">
+                <tr className="border-b bg-muted/60 text-xs font-medium text-muted-foreground">
+                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">时间</th>
+                  <th className="px-4 py-2.5 font-medium">级别</th>
+                  <th className="px-4 py-2.5 font-medium">范围</th>
+                  <th className="px-4 py-2.5 font-medium">任务 ID</th>
+                  <th className="px-4 py-2.5 font-medium">消息</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/40">
+                {visibleLogs.map((log, idx) => (
+                  <tr key={idx} className="transition-colors hover:bg-muted/30">
+                    <td className="whitespace-nowrap px-4 py-2.5 font-mono text-muted-foreground">
+                      {log.timestamp}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <ToneBadge tone={LEVEL_TONE[log.level]}>
+                        {log.level.toUpperCase()}
+                      </ToneBadge>
+                    </td>
+                    <td className="px-4 py-2.5 text-muted-foreground">
+                      {SCOPE_LABEL[log.scope]}
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {log.taskId ? (
+                        <button
+                          type="button"
+                          onClick={() => copyTaskId(log.taskId!)}
+                          className="font-mono text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors"
+                          title="点击复制任务 ID"
+                        >
+                          {copiedId === log.taskId ? "已复制" : `${log.taskId.slice(0, 8)}…`}
+                        </button>
+                      ) : null}
+                    </td>
+                    <td className="min-w-0 break-words px-4 py-2.5 font-mono text-foreground/80">
+                      {log.message}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <InfiniteScrollSentinel ref={sentinelRef} hasMore={hasMore} />
+          </div>
         )}
       </div>
     </div>
