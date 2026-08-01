@@ -39,6 +39,11 @@ jobs:
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
             cmake \
+            nasm \
+            libde265-dev \
+            libx265-dev \
+            libjpeg-dev \
+            libpng-dev \
             pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
