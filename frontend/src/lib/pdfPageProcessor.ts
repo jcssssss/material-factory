@@ -31,11 +31,19 @@ import {
   isCanvasBlank,
 } from "./pdf";
 import {
-  exportPageAsJpegBytes,
   buildPageImageFileName,
   calculateFitScale,
   writeImageToDisk,
+  embedJfifDpi,
+  OUTPUT_WIDTH,
+  OUTPUT_HEIGHT,
+  TARGET_DPI,
 } from "./exportImage";
+import {
+  createEncodeWorker,
+  encodeBitmapInWorker,
+  terminateEncodeWorker,
+} from "./encodeWorker";
 import { resolvePageRule } from "./pageRule";
 import { logger } from "./logger";
 import { isSupportedInputPath } from "./inputValidation";
@@ -118,6 +126,67 @@ export class PdfPageProcessor implements PageProcessor {
   // pdfPath → 缓存条目。
   // 在 prepareWorkItem 中写入，在 renderAndExportPage 最后一页后清理。
   private readonly docCache = new Map<string, CachedDoc>();
+  // 共享编码 Worker：首个页面懒创建，末页/cleanup 时终止，避免每页重建。
+  private encodeWorker: Worker | null = null;
+  // 流水线预取：当前页编码期间提前渲染下一页，使页 N 的编码（Worker）与
+  // 页 N+1 的光栅化（主线程）重叠，缩短单 PDF 总墙钟。
+  // 预取失败返回 null（下次实际渲染时再正常报错），避免 unhandled rejection。
+  private prefetch: {
+    pageNumber: number;
+    promise: Promise<HTMLCanvasElement | null>;
+  } | null = null;
+
+  private async getEncodeWorker(): Promise<Worker> {
+    if (!this.encodeWorker) {
+      this.encodeWorker = await createEncodeWorker();
+    }
+    return this.encodeWorker;
+  }
+
+  // 渲染单页到 canvas（probe 计算 scale + pdf.js 光栅化 + 空白检测 + page 清理）。
+  // 供正常渲染与流水线预取共用。
+  private async renderOne(
+    doc: PDFDocumentProxy,
+    pageNumber: number,
+    task: TaskConfig,
+    pdfPath: string,
+  ): Promise<HTMLCanvasElement> {
+    const probePage = await doc.getPage(pageNumber);
+    const probeViewport = probePage.getViewport({ scale: 1 });
+    probePage.cleanup();
+
+    const fitScale = calculateFitScale(probeViewport.width, probeViewport.height);
+    const { canvas: sourceCanvas, page } = await renderPageToCanvas(doc, pageNumber, fitScale);
+    logger.pageInfo(task.taskId, pdfPath, pageNumber,
+      `PDF 页面渲染完成，canvas 尺寸：${sourceCanvas.width}x${sourceCanvas.height}`);
+    if (isCanvasBlank(sourceCanvas)) {
+      logger.pageWarn(task.taskId, pdfPath, pageNumber, `页面渲染结果疑似空白`);
+    }
+    page.cleanup();
+    return sourceCanvas;
+  }
+
+  // 触发下一页预取（异步，不阻塞当前页编码）。prefetch 失败时置空并吞掉，
+  // 由实际渲染路径重新报错，避免 unhandled rejection。
+  private prefetchNextPage(
+    doc: PDFDocumentProxy,
+    workItem: PdfWorkItem,
+    currentPageNumber: number,
+    task: TaskConfig,
+    pdfPath: string,
+  ): void {
+    const selected = workItem.selectedPages;
+    const currentIdx = selected.indexOf(currentPageNumber);
+    const nextPageNumber = selected[currentIdx + 1];
+    if (nextPageNumber === undefined) return;
+    this.prefetch = {
+      pageNumber: nextPageNumber,
+      promise: this.renderOne(doc, nextPageNumber, task, pdfPath).catch(() => {
+        this.prefetch = null;
+        return null;
+      }),
+    };
+  }
 
   async expandPdfs(task: TaskConfig): Promise<string[]> {
     if (task.sourceType === "files") {
@@ -193,8 +262,11 @@ export class PdfPageProcessor implements PageProcessor {
       throw new Error(ruleResult.error);
     }
 
-    // 7. 缓存 doc 供后续 renderAndExportPage 使用。
-    this.docCache.set(pdfPath, { doc, pdfPath });
+    // 7. 预扫描阶段不缓存 doc：解析页码后立即销毁，避免整批 PDF 的
+    //    PDFDocumentProxy + 各自 pdf.js worker 线程全部常驻（批量大时
+    //    内存达 GB 级）。渲染阶段由 openDocument() 按需重新加载当前
+    //    PDF，保证任意时刻仅 ~1 个 doc + 1 个 worker 存活。
+    await destroyPdfDocument(doc);
 
     return {
       taskId: task.taskId,
@@ -204,6 +276,29 @@ export class PdfPageProcessor implements PageProcessor {
       selectedPages: ruleResult.pages,
       status: "pending",
     };
+  }
+
+  // 渲染前按需加载 PDF 文档并缓存（配合预扫描不缓存，逐 PDF 生命周期）。
+  // 仅在 prepareWorkItem 解析出合法页码的 PDF 上由 taskRunner 调用；
+  // 加载失败抛 PDF 级错误（由 taskRunner 捕获记 failed 并继续下一 PDF）。
+  async openDocument(pdfPath: string): Promise<void> {
+    if (this.docCache.has(pdfPath)) return;
+
+    let bytes: Uint8Array;
+    try {
+      bytes = await readPdfBytes(pdfPath);
+    } catch (err) {
+      throw classifyReadError(pdfPath, err);
+    }
+
+    let doc: PDFDocumentProxy;
+    try {
+      doc = await loadPdfDocument(bytes);
+    } catch (err) {
+      throw classifyPdfParseError(pdfPath, err);
+    }
+
+    this.docCache.set(pdfPath, { doc, pdfPath });
   }
 
   async renderAndExportPage(ctx: PageProcessContext): Promise<PageResult> {
@@ -217,47 +312,51 @@ export class PdfPageProcessor implements PageProcessor {
     const { doc } = cached;
 
     try {
-      // 1. 渲染高分辨率源图。
-      //    计算合适的 scale：先获取页面 scale=1 的尺寸，
-      //    再按目标画布的 fit-scale 渲染，保证源图分辨率 ≥ 目标画布。
-      const probePage = await doc.getPage(pageNumber);
-      const probeViewport = probePage.getViewport({ scale: 1 });
-      // 探测后立即释放（实际渲染会重新 getPage）。
-      probePage.cleanup();
-
-      const fitScale = calculateFitScale(
-        probeViewport.width,
-        probeViewport.height
-      );
-      // 渲染到目标画布等比例尺寸，避免后续合成时再放大导致画质损失。
-      const renderScale = fitScale;
-
-      const { canvas: sourceCanvas, page } = await renderPageToCanvas(
-        doc,
-        pageNumber,
-        renderScale
-      );
-      logger.pageInfo(task.taskId, pdfPath, pageNumber,
-        `PDF 页面渲染完成，canvas 尺寸：${sourceCanvas.width}x${sourceCanvas.height}`);
-
-      // 2. 空白页检测：画布恒为白底时说明该页没有绘出可见内容（可能是确实
-      //    为空的页面，也可能是渲染异常）。仅记 warn 帮助排查，不中断、不重试。
-      //    （曾尝试 disableFontFace 回退重渲染，实测对需要 CMap 的中文字体反而
-      //    更差，故移除；空白页根因是 stopAtErrors 误中止解析，见 pdf.ts。）
-      if (isCanvasBlank(sourceCanvas)) {
-        logger.pageWarn(task.taskId, pdfPath, pageNumber,
-          `页面渲染结果疑似空白`);
+      // 1. 渲染当前页：优先使用上一页触发的流水线预取结果（页间重叠）；
+      //    否则现场渲染（pdf.js 光栅化 + 空白检测，见 renderOne）。
+      let sourceCanvas: HTMLCanvasElement;
+      if (this.prefetch && this.prefetch.pageNumber === pageNumber) {
+        const prefetched = await this.prefetch.promise;
+        this.prefetch = null;
+        sourceCanvas = prefetched ?? (await this.renderOne(doc, pageNumber, task, pdfPath));
+      } else {
+        // 丢弃可能指向其他页的过期预取：已产出的 canvas 归零，强制回收 GPU 显存。
+        void this.prefetch?.promise
+          .then((c) => {
+            if (c) {
+              c.width = 0;
+              c.height = 0;
+            }
+          })
+          .catch(() => {});
+        this.prefetch = null;
+        sourceCanvas = await this.renderOne(doc, pageNumber, task, pdfPath);
       }
-      // 渲染完成后清理 page 资源。
-      page.cleanup();
 
-      // 3. 合成 3:4 画布 + 导出 JPG（300 DPI 元数据嵌入）。
-      const jpegBytes = await exportPageAsJpegBytes(sourceCanvas);
+      // 2. 立即触发下一页渲染预取（异步，不阻塞当前页编码）：
+      //    页 N 的 JPEG 编码（Worker）与页 N+1 的光栅化（主线程）并行，
+      //    缩短单 PDF 总墙钟；末页不预取。
+      this.prefetchNextPage(doc, workItem, pageNumber, task, pdfPath);
+
+      // 3. 合成 3:4 画布 + 导出 JPG。
+      //    PDF 渲染结果转为 ImageBitmap（一次 GPU 位图提交），transfer 给编码
+      //    Worker 做等比合成 + JPEG 编码，主线程不再被 toBlob 同步编码阻塞。
+      //    DPI 元数据在主线程嵌入（轻量字节拼接）。
+      const bitmap = await createImageBitmap(sourceCanvas);
 
       // 释放源 canvas 显存：宽高归零强制 WebKit 回收 GPU 显存。
       // 不释放会逐页累积（每页 ~30MB RGBA），任务末尾 getContext('2d') 稳定返回 null。
       sourceCanvas.width = 0;
       sourceCanvas.height = 0;
+
+      const encodeWorker = await this.getEncodeWorker();
+      const rawJpeg = await encodeBitmapInWorker(
+        encodeWorker,
+        bitmap,
+        OUTPUT_WIDTH,
+        OUTPUT_HEIGHT,
+      );
+      const jpegBytes = embedJfifDpi(new Uint8Array(rawJpeg), TARGET_DPI);
 
       // 4. 确保输出目录存在。
       //    输出目录不可写 → 页级失败（taskRunner 会继续下一页；
@@ -281,12 +380,7 @@ export class PdfPageProcessor implements PageProcessor {
       }
 
       // 6. 如果是最后一页，销毁 PDF 文档释放资源。
-      const selectedPages = workItem.selectedPages;
-      const isLastPage = pageNumber === selectedPages[selectedPages.length - 1];
-      if (isLastPage) {
-        await destroyPdfDocument(doc);
-        this.docCache.delete(pdfPath);
-      }
+      await this.cleanupIfLastPage(pdfPath, pageNumber, workItem, doc);
 
       return {
         taskId: task.taskId,
@@ -298,21 +392,37 @@ export class PdfPageProcessor implements PageProcessor {
     } catch (err) {
       // 渲染或写盘失败：抛出异常由 taskRunner 捕获并生成 failed PageResult。
       // 注意：即使失败，如果是最后一页，仍需清理 doc 缓存。
-      const selectedPages = workItem.selectedPages;
-      const isLastPage = pageNumber === selectedPages[selectedPages.length - 1];
-      if (isLastPage) {
-        await destroyPdfDocument(doc);
-        this.docCache.delete(pdfPath);
-      }
+      // 预取可能指向其他页，失败后丢弃，避免残留渲染占用资源。
+      this.prefetch = null;
+      await this.cleanupIfLastPage(pdfPath, pageNumber, workItem, doc);
       throw err;
     }
   }
 
+  // 末页清理：销毁 PDF 文档并终止编码 Worker（成功与失败路径共用）。
+  // Worker 仅在任务结束（末页）时终止，页与页之间保持复用。
+  private async cleanupIfLastPage(
+    pdfPath: string,
+    pageNumber: number,
+    workItem: PdfWorkItem,
+    doc: PDFDocumentProxy,
+  ): Promise<void> {
+    const selectedPages = workItem.selectedPages;
+    if (pageNumber !== selectedPages[selectedPages.length - 1]) return;
+    await destroyPdfDocument(doc);
+    this.docCache.delete(pdfPath);
+    terminateEncodeWorker(this.encodeWorker);
+    this.encodeWorker = null;
+  }
+
   // 兜底清理：队列结束后若仍有缓存（如任务被中止），释放资源。
   async cleanup(): Promise<void> {
+    this.prefetch = null;
     for (const { doc } of this.docCache.values()) {
       await destroyPdfDocument(doc);
     }
     this.docCache.clear();
+    terminateEncodeWorker(this.encodeWorker);
+    this.encodeWorker = null;
   }
 }

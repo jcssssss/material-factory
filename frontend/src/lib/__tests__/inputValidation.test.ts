@@ -48,14 +48,14 @@ describe("isWordPath", () => {
 });
 
 describe("validateTaskInput", () => {
-  it("缺少任务名", () => {
+  it("缺少任务名不再阻止（任务名由资料文件夹名自动推导）", () => {
     const r = validateTaskInput({
       taskName: "",
       sourceType: "files",
       sourcePaths: ["a.pdf"],
       outputDir: "/out",
     });
-    expect(r).toMatch(/任务名/);
+    expect(r).toBeNull();
   });
 
   it("缺少输入路径", () => {

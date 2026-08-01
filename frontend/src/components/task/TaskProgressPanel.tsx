@@ -1,6 +1,7 @@
 import { useTaskStore } from "../../store/useTaskStore";
 import { useShallow } from "zustand/react/shallow";
 import { EmptyState } from "../common/EmptyState";
+import { Tip } from "../common/Tip";
 import type { LogEntry, StageKind } from "../../types/task";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -8,6 +9,7 @@ import { Circle, CircleCheck, ArrowRight, Play, Pause, XCircle } from "lucide-re
 import { cn } from "@/lib/utils";
 
 const STAGE_LABELS: Record<StageKind, string> = {
+  word_convert: "Word 转换",
   pdf_convert: "PDF 转换",
   material_list: "资料列表图",
   print_compose: "仿打印合成",
@@ -192,12 +194,14 @@ export function TaskProgressPanel() {
         <div className="mb-1.5 text-xs font-medium text-muted-foreground">最近事件</div>
         <ul className="max-h-32 overflow-auto rounded-lg bg-muted/30 p-2 text-xs">
           {recentLogs.slice().reverse().map((log, idx) => (
-            <li key={idx} className="flex items-center gap-1.5 truncate py-0.5 font-mono text-muted-foreground" title={log.message}>
-              <span className="shrink-0 text-muted-foreground/50">
-                {log.timestamp}
-              </span>
-              {log.message}
-            </li>
+            <Tip key={idx} label={log.message} onlyOverflow>
+              <li className="flex items-center gap-1.5 truncate py-0.5 font-mono text-muted-foreground">
+                <span className="shrink-0 text-muted-foreground/50">
+                  {log.timestamp}
+                </span>
+                {log.message}
+              </li>
+            </Tip>
           ))}
           {!hasLogs ? (
             <li className="py-0.5 text-muted-foreground">尚未产生日志</li>

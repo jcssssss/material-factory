@@ -31,6 +31,7 @@ import { logger } from "./logger";
 import { useTaskStore } from "../store/useTaskStore";
 import { isWordPath } from "./inputValidation";
 import { convertWordFilesToPdf } from "./wordConverter";
+import { createProgressThrottle } from "./progressThrottle";
 import { TaskController } from "./taskController";
 import {
   saveBreakpoint,
@@ -45,13 +46,20 @@ import {
 } from "./materialList/layoutEngine";
 import {
   renderLayoutPageToCanvas,
-  canvasToJpegBlob,
+  MATERIAL_IMAGE_WIDTH,
+  MATERIAL_IMAGE_HEIGHT,
   MAX_ITEMS_PER_PAGE,
 } from "./materialList/imageRenderer";
 import type { FolderTreeNode } from "../types/materialList";
 import { invoke } from "@tauri-apps/api/core";
 import { generatePrintImages } from "./printEngine/compositor";
 import { listTemplates } from "./printEngine/backgroundDb";
+import { writeImageToDisk } from "./exportImage";
+import {
+  createEncodeWorker,
+  encodeBitmapInWorker,
+  terminateEncodeWorker,
+} from "./encodeWorker";
 
 function basename(p: string): string {
   const parts = p.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -127,6 +135,21 @@ function collectNonEmptyDirectories(root: FolderTreeNode): FolderTreeNode[] {
   return result;
 }
 
+// 预计算阶段管线：根据任务配置决定实际执行的阶段列表。
+// includeWordConvert 表示任务输入含 Word 文件（首次执行且存在 Word 输入），
+// 此时 word_convert 阶段排在 pdf_convert 之前；断点恢复模式跳过该阶段。
+function buildPlannedStages(
+  task: TaskConfig,
+  includeWordConvert: boolean
+): StageKind[] {
+  const stages: StageKind[] = [];
+  if (includeWordConvert) stages.push("word_convert");
+  stages.push("pdf_convert");
+  if (task.generateMaterialList) stages.push("material_list");
+  if (task.generatePrintImages) stages.push("print_compose");
+  return stages;
+}
+
 // 为工作台任务生成资料列表展示图。
 //
 // 与独立资料列表模块的区别：
@@ -142,70 +165,95 @@ async function generateMaterialListImages(
   task: TaskConfig,
   taskOutputDir: string,
   onProgress?: (done: number, total: number) => void,
+  controller?: TaskController,
 ): Promise<void> {
   logger.taskInfo(task.taskId, `开始生成资料列表展示图`);
 
   // 资料列表图片统一输出到 {taskOutputDir}/资料列表/ 子文件夹。
   const materialListDir = joinPath(taskOutputDir, "资料列表");
 
-  for (const folderPath of task.sourcePaths) {
-    let root: FolderTreeNode;
-    try {
-      root = await scanFolderTree(folderPath);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.taskWarn(task.taskId, `资料列表扫描失败，跳过：${basename(folderPath)} - ${msg}`);
-      continue;
-    }
+  // 共享编码 Worker：把资料列表 toBlob 编码移出主线程，任务内复用。
+  const encodeWorker = await createEncodeWorker();
 
-    const dirsToRender = collectNonEmptyDirectories(root);
-    if (dirsToRender.length === 0) {
-      logger.taskWarn(task.taskId, `资料列表无有效内容，跳过：${basename(folderPath)}`);
-      continue;
-    }
-
-    // 预扫描计算总页数
-    let totalPages = 0;
-    for (const dir of dirsToRender) {
-      const sorted = sortDirectoryChildren(dir.children);
-      totalPages += paginateChildren(sorted, MAX_ITEMS_PER_PAGE).length;
-    }
-
-    // 确保子文件夹存在（write_image_file 要求父目录已存在）。
-    await invoke<void>("ensure_output_dir", { path: materialListDir });
-
-    let currentIndex = 0;
-    for (const dir of dirsToRender) {
+  try {
+    for (const folderPath of task.sourcePaths) {
+      let root: FolderTreeNode;
       try {
-        const sorted = sortDirectoryChildren(dir.children);
-        const pages = paginateChildren(sorted, MAX_ITEMS_PER_PAGE);
-        for (const page of pages) {
-          const canvas = await renderLayoutPageToCanvas(page);
-          const blob = await canvasToJpegBlob(canvas);
-          const bytes = new Uint8Array(await blob.arrayBuffer());
-          const filename = formatImageFilename(currentIndex, totalPages);
-          const outputPath = joinPath(materialListDir, filename);
-          await invoke<void>("write_image_file", {
-            path: outputPath,
-            bytes: Array.from(bytes),
-          });
-          currentIndex += 1;
-          onProgress?.(currentIndex, totalPages);
-          logger.taskInfo(task.taskId, `资料列表图已生成 → ${outputPath}`);
-          // 让渡主线程：避免连续 Canvas 渲染 + IPC 写盘阻塞 UI。
-          // setTimeout(0) 让事件循环有机会处理 UI 交互和重绘。
-          await new Promise((resolve) => setTimeout(resolve, 0));
-        }
+        root = await scanFolderTree(folderPath);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        logger.taskWarn(task.taskId, `资料列表目录渲染失败，跳过：${dir.name} - ${msg}`);
+        logger.taskWarn(task.taskId, `资料列表扫描失败，跳过：${basename(folderPath)} - ${msg}`);
+        continue;
       }
-    }
 
-    logger.taskInfo(
-      task.taskId,
-      `资料列表完成：${basename(folderPath)}，共 ${currentIndex} 张图片`
-    );
+      const dirsToRender = collectNonEmptyDirectories(root);
+      if (dirsToRender.length === 0) {
+        logger.taskWarn(task.taskId, `资料列表无有效内容，跳过：${basename(folderPath)}`);
+        continue;
+      }
+
+      // 预扫描计算总页数
+      let totalPages = 0;
+      for (const dir of dirsToRender) {
+        const sorted = sortDirectoryChildren(dir.children);
+        totalPages += paginateChildren(sorted, MAX_ITEMS_PER_PAGE).length;
+      }
+
+      // 确保子文件夹存在（write_image_file 要求父目录已存在）。
+      await invoke<void>("ensure_output_dir", { path: materialListDir });
+
+      let currentIndex = 0;
+      for (const dir of dirsToRender) {
+        try {
+          const sorted = sortDirectoryChildren(dir.children);
+          const pages = paginateChildren(sorted, MAX_ITEMS_PER_PAGE);
+          for (const page of pages) {
+            // 图片边界：检查暂停/取消信号（资料列表阶段支持尽快取消）。
+            if (controller) {
+              const shouldContinue = await controller.checkAndAwait();
+              if (!shouldContinue) {
+                logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+                return;
+              }
+            }
+            const canvas = await renderLayoutPageToCanvas(page);
+            // JPEG 编码移入 Worker（主线程只做一次 GPU 位图提交，不再被 toBlob 阻塞）。
+            const bitmap = await createImageBitmap(canvas);
+            const rawJpeg = await encodeBitmapInWorker(
+              encodeWorker,
+              bitmap,
+              MATERIAL_IMAGE_WIDTH,
+              MATERIAL_IMAGE_HEIGHT,
+            );
+            // 释放源 canvas 显存：宽高归零强制 WebKit 回收 GPU 位图（对齐 pdfPageProcessor 做法）。
+            canvas.width = 0;
+            canvas.height = 0;
+            const bytes = new Uint8Array(rawJpeg);
+            const filename = formatImageFilename(currentIndex, totalPages);
+            const outputPath = joinPath(materialListDir, filename);
+            // 走 write_image_binary 顶层二进制通道，避免 Array.from(bytes) → JSON 数字数组
+            // 在主线程序列化阻塞（每张 15 万~60 万 number、2~7MB JSON）。
+            await writeImageToDisk(outputPath, bytes);
+            currentIndex += 1;
+            onProgress?.(currentIndex, totalPages);
+            logger.taskInfo(task.taskId, `资料列表图已生成 → ${outputPath}`);
+            // 让渡主线程：避免连续 Canvas 渲染 + IPC 写盘阻塞 UI。
+            // setTimeout(0) 让事件循环有机会处理 UI 交互和重绘。
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.taskWarn(task.taskId, `资料列表目录渲染失败，跳过：${dir.name} - ${msg}`);
+        }
+      }
+
+      logger.taskInfo(
+        task.taskId,
+        `资料列表完成：${basename(folderPath)}，共 ${currentIndex} 张图片`
+      );
+    }
+  } finally {
+    terminateEncodeWorker(encodeWorker);
   }
 }
 
@@ -221,7 +269,31 @@ export async function runTask(
   const pageResults: PageResult[] = [];
   let hasFatalError = false;
 
+  // 预计算阶段管线：根据任务配置决定实际执行的阶段列表。
+  // 默认不含 word_convert（断点恢复模式 / 任务级失败时均无 Word 转换阶段）；
+  // 首次执行且存在 Word 输入时在下方重新计算，使 Word 转换进度能进入整体进度。
+  let plannedStages: StageKind[] = buildPlannedStages(task, false);
+  // 已完成阶段（按执行顺序累积），供 setProgress 的 completedStages 使用。
+  // 相比硬编码阶段列表，能自然适配 word_convert 的插入。
+  const completedStages: StageKind[] = [];
+
+  // 进度节流：高频页级进度合并到 ~10Hz，避免 2000 页触发 2000 次 React 渲染；
+  // 阶段切换/终态点先 flush 落地 pending，再直接 setProgress 新值。
+  const progressThrottle = createProgressThrottle(100);
+
   logger.taskInfo(task.taskId, `任务${breakpoint ? "恢复" : "开始"}：${task.taskName}`);
+
+  // 初始进度：expandPdfs/预扫描可能耗时数秒，先推送 0% 进度，让面板立即从
+  // 「暂无执行中的任务」切到当前任务、显示阶段管线。直接 setProgress 绕过节流
+  // （一次性低频率事件，throttle 尚无 pending）。
+  useTaskStore.getState().setProgress({
+    taskId: task.taskId,
+    plannedStages,
+    currentStage: null,
+    completedStages: [],
+    successPages: 0,
+    failedPages: 0,
+  });
 
   // 断点 PDF 列表（用于每个 PDF 完成后更新断点）
   let breakpointPdfs: PdfBreakpoint[] = [];
@@ -270,7 +342,12 @@ export async function runTask(
     // 展开任务输入为 PDF/Word 文件路径列表。
     let inputPaths: string[] = [];
     try {
+      logger.taskInfo(task.taskId, "正在扫描输入文件…");
       inputPaths = await processor.expandPdfs(task);
+      logger.taskInfo(
+        task.taskId,
+        `扫描完成：找到 ${inputPaths.length} 个 PDF/Word 文件`
+      );
       if (inputPaths.length === 0) {
         hasFatalError = true;
         logger.taskError(
@@ -290,6 +367,9 @@ export async function runTask(
       const wordInputs = inputPaths.filter((p) => isWordPath(p));
       const pdfInputs = inputPaths.filter((p) => !isWordPath(p));
 
+      // 存在 Word 输入时，将 word_convert 阶段纳入整体进度（位于 PDF 转换之前）。
+      plannedStages = buildPlannedStages(task, wordInputs.length > 0);
+
       // PDF 直接入列
       for (const inputPath of pdfInputs) {
         resolvedPdfs.push({ pdfPath: inputPath, originalPath: inputPath });
@@ -304,12 +384,52 @@ export async function runTask(
 
       // Word 文件分批转换：每批一次 LibreOffice 调用（避免逐文件启动 soffice），
       // 分批让进度可见、单个坏文件卡住只影响所在批。单文件失败仅记录，不影响其余。
+      // Rust 侧复用共享 profile（word_cache/shared_lo_profile），第二次起 warm start
+      // ~1-3s；因此必须串行逐批执行——多路 soffice 并发会争抢同一共享 profile 锁。
+      // 转换进度同时写入整体进度（word_convert 阶段），并记录对应日志。
       if (wordInputs.length > 0) {
         const BATCH = 6;
         logger.taskInfo(task.taskId, `开始转换 ${wordInputs.length} 个 Word 文件…`);
         let processed = 0;
+        // 上报 word_convert 阶段进度（含 success/failed 汇总，Word 转换失败会写入 pageResults）。
+        const reportWordProgress = () => {
+          const wordSuccess = pageResults.filter((r) => r.status === "success").length;
+          const wordFailed = pageResults.filter((r) => r.status === "failed").length;
+          progressThrottle.push({
+            taskId: task.taskId,
+            plannedStages,
+            currentStage: {
+              stage: "word_convert",
+              done: processed,
+              total: wordInputs.length,
+              detail: `Word 转换 ${Math.min(processed, wordInputs.length)}/${wordInputs.length}`,
+            },
+            completedStages: [...completedStages],
+            successPages: wordSuccess,
+            failedPages: wordFailed,
+          });
+        };
+
+        // 分片：每批 BATCH 个文件（一次 LibreOffice 调用）。
+        const batches: string[][] = [];
         for (let start = 0; start < wordInputs.length; start += BATCH) {
-          const batch = wordInputs.slice(start, start + BATCH);
+          batches.push(wordInputs.slice(start, start + BATCH));
+        }
+
+        reportWordProgress(); // 初始 0/N，立即进入整体进度
+
+        // 串行逐批转换：共享 profile 下并发 soffice 会撞锁，顺序执行最稳。
+        // 单批失败仅记录（批级 try/catch），不影响其余批次。
+        for (const batch of batches) {
+          // 批次边界：检查暂停/取消信号。Word 转换是串行多批（每批一次 soffice），
+          // 无此检查点则取消/暂停要等全部 Word 转换完才生效。
+          if (controller) {
+            const shouldContinue = await controller.checkAndAwait();
+            if (!shouldContinue) {
+              logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+              return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
+            }
+          }
           try {
             const results = await convertWordFilesToPdf(batch, task.taskId);
             processed += batch.length;
@@ -387,7 +507,10 @@ export async function runTask(
               });
             }
           }
+          reportWordProgress(); // 每批完成后更新整体进度
         }
+        // Word 转换阶段完成，标记为已完成阶段。
+        completedStages.push("word_convert");
       }
     }
 
@@ -410,11 +533,6 @@ export async function runTask(
       return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
     }
   }
-
-  // 预计算阶段管线：根据任务配置决定实际执行的阶段列表。
-  const plannedStages: StageKind[] = ["pdf_convert"];
-  if (task.generateMaterialList) plannedStages.push("material_list");
-  if (task.generatePrintImages) plannedStages.push("print_compose");
 
   if (!hasFatalError) {
     // ── 预扫描：收集所有待处理 PDF 的工作项，计算阶段总页数 ──
@@ -478,19 +596,23 @@ export async function runTask(
     // 设置阶段初始进度。
     const initSuccess = pageResults.filter((r) => r.status === "success").length;
     const initFailed = pageResults.filter((r) => r.status === "failed").length;
+    progressThrottle.flush(); // 落地 Word 转换阶段 pending 进度
     useTaskStore.getState().setProgress({
       taskId: task.taskId,
       plannedStages,
       currentStage: stagePdfPages > 0
         ? { stage: "pdf_convert", done: 0, total: stagePdfPages, detail: "准备开始…" }
         : null,
-      completedStages: [],
+      completedStages: [...completedStages],
       successPages: initSuccess,
       failedPages: initFailed,
     });
 
     // ── 逐 PDF 处理 ──
     let cumulativePages = 0;
+    // 递增计数器替代逐页 pageResults.filter（消除 O(n²)），初始为预扫描完成时的累计值。
+    let runningSuccess = initSuccess;
+    let runningFailed = initFailed;
     for (const { resolved, workItem, bpPdf } of preparedPdfs) {
       const displayPath = resolved.originalPath;
 
@@ -508,6 +630,24 @@ export async function runTask(
         `PDF 开始：${workItem.pdfName}（${workItem.selectedPages.length} 页）`
       );
 
+      // 按需加载该 PDF 文档（预扫描不缓存 doc，渲染前重新加载，末页自动销毁）。
+      // 加载失败记 PDF 级失败并跳过，不中断同任务其他 PDF。
+      try {
+        await processor.openDocument(resolved.pdfPath);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.taskError(task.taskId, `PDF 加载失败：${basename(displayPath)} - ${msg}`);
+        pageResults.push({
+          taskId: task.taskId,
+          pdfPath: displayPath,
+          pageNumber: 0,
+          status: "failed",
+          errorMessage: `PDF 加载失败：${msg}`,
+        });
+        runningFailed += 1;
+        continue;
+      }
+
       const pdfOutputDir = joinPath(taskOutputDir, workItem.pdfName);
 
       // 逐页处理。单页失败不中断同 PDF 下一页。
@@ -520,11 +660,9 @@ export async function runTask(
             return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
           }
         }
-        // 更新执行进度（当前页）。
+        // 更新执行进度（当前页）。用递增计数器替代每页 filter（消除 O(n²)）。
         cumulativePages += 1;
-        const currentSuccess = pageResults.filter((r) => r.status === "success").length;
-        const currentFailed = pageResults.filter((r) => r.status === "failed").length;
-        useTaskStore.getState().setProgress({
+        progressThrottle.push({
           taskId: task.taskId,
           plannedStages,
           currentStage: {
@@ -533,9 +671,9 @@ export async function runTask(
             total: stagePdfPages,
             detail: `${workItem.pdfName} 第 ${pageNumber}/${workItem.selectedPages.length} 页`,
           },
-          completedStages: [],
-          successPages: currentSuccess,
-          failedPages: currentFailed,
+          completedStages: [...completedStages],
+          successPages: runningSuccess,
+          failedPages: runningFailed,
         });
 
         const ctx: PageProcessContext = {
@@ -553,6 +691,7 @@ export async function runTask(
           result.pdfPath = displayPath;
           pageResults.push(result);
           if (result.status === "success") {
+            runningSuccess += 1;
             logger.pageInfo(
               task.taskId,
               displayPath,
@@ -560,6 +699,7 @@ export async function runTask(
               `导出成功 → ${result.outputPath ?? ""}`
             );
           } else if (result.status === "failed") {
+            runningFailed += 1;
             logger.pageError(
               task.taskId,
               displayPath,
@@ -577,6 +717,7 @@ export async function runTask(
             errorMessage: msg,
           };
           pageResults.push(failedResult);
+          runningFailed += 1;
           logger.pageError(
             task.taskId,
             displayPath,
@@ -612,13 +753,15 @@ export async function runTask(
   }
 
   // PDF 转换阶段完成，标记为已完成。
+  completedStages.push("pdf_convert");
   const pdfSuccess = pageResults.filter((r) => r.status === "success").length;
   const pdfFailed = pageResults.filter((r) => r.status === "failed").length;
+  progressThrottle.flush(); // 落地逐页 pending 进度
   useTaskStore.getState().setProgress({
     taskId: task.taskId,
     plannedStages,
     currentStage: null,
-    completedStages: ["pdf_convert"],
+    completedStages: [...completedStages],
     successPages: pdfSuccess,
     failedPages: pdfFailed,
   });
@@ -627,27 +770,41 @@ export async function runTask(
   // 对 sourcePaths 中的文件夹生成资料列表图，输出到 taskOutputDir。
   // 失败不中断任务（记 warn 日志），不影响任务最终状态。
   if (task.generateMaterialList && !hasFatalError) {
+    // 阶段入口：检查暂停/取消信号，避免取消时仍进入资料列表阶段。
+    if (controller) {
+      const shouldContinue = await controller.checkAndAwait();
+      if (!shouldContinue) {
+        logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+        return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
+      }
+    }
     // 进入资料列表阶段。
+    progressThrottle.flush();
     useTaskStore.getState().setProgress({
       taskId: task.taskId,
       plannedStages,
       currentStage: { stage: "material_list", done: 0, total: 0, detail: "扫描文件夹…" },
-      completedStages: ["pdf_convert"],
+      completedStages: [...completedStages],
       successPages: pdfSuccess,
       failedPages: pdfFailed,
     });
 
     try {
-      await generateMaterialListImages(task, taskOutputDir, (done, total) => {
-        useTaskStore.getState().setProgress({
-          taskId: task.taskId,
-          plannedStages,
-          currentStage: { stage: "material_list", done, total, detail: `生成中 ${done}/${total}` },
-          completedStages: ["pdf_convert"],
-          successPages: pdfSuccess,
-          failedPages: pdfFailed,
-        });
-      });
+      await generateMaterialListImages(
+        task,
+        taskOutputDir,
+        (done, total) => {
+          progressThrottle.push({
+            taskId: task.taskId,
+            plannedStages,
+            currentStage: { stage: "material_list", done, total, detail: `生成中 ${done}/${total}` },
+            completedStages: [...completedStages],
+            successPages: pdfSuccess,
+            failedPages: pdfFailed,
+          });
+        },
+        controller,
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.taskWarn(task.taskId, `资料列表生成异常：${msg}`);
@@ -656,13 +813,13 @@ export async function runTask(
 
   // 资料列表阶段完成。
   if (task.generateMaterialList && !hasFatalError) {
+    completedStages.push("material_list");
+    progressThrottle.flush();
     useTaskStore.getState().setProgress({
       taskId: task.taskId,
       plannedStages,
       currentStage: null,
-      completedStages: plannedStages.includes("material_list")
-        ? ["pdf_convert", "material_list"]
-        : ["pdf_convert"],
+      completedStages: [...completedStages],
       successPages: pdfSuccess,
       failedPages: pdfFailed,
     });
@@ -672,6 +829,14 @@ export async function runTask(
   // 对 taskOutputDir 中的 JPG 逐张与背景模板合成仿打印效果图。
   // 失败不中断任务（记 warn 日志），不影响任务最终状态。
   if (task.generatePrintImages && !hasFatalError) {
+    // 阶段入口：检查暂停/取消信号，避免取消时仍进入仿打印合成。
+    if (controller) {
+      const shouldContinue = await controller.checkAndAwait();
+      if (!shouldContinue) {
+        logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+        return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
+      }
+    }
     try {
       const allTemplates = await listTemplates();
       const calibrated = allTemplates.filter((t) => t.calibrated);
@@ -687,12 +852,12 @@ export async function runTask(
           task.taskId,
           `开始仿打印合成（${backgrounds.length} 个背景模板）`,
         );
-        const curCompleted = useTaskStore.getState().progress?.completedStages ?? [];
+        progressThrottle.flush();
         useTaskStore.getState().setProgress({
           taskId: task.taskId,
           plannedStages,
           currentStage: { stage: "print_compose", done: 0, total: 0, detail: "准备合成…" },
-          completedStages: curCompleted,
+          completedStages: [...completedStages],
           successPages: pdfSuccess,
           failedPages: pdfFailed,
         });
@@ -700,22 +865,33 @@ export async function runTask(
           taskOutputDir,
           backgrounds,
           (done, total) => {
-            const prevCompleted = useTaskStore.getState().progress?.completedStages ?? [];
-            useTaskStore.getState().setProgress({
+            progressThrottle.push({
               taskId: task.taskId,
               plannedStages,
               currentStage: { stage: "print_compose", done, total, detail: `合成中 ${done}/${total}` },
-              completedStages: prevCompleted,
+              completedStages: [...completedStages],
               successPages: pdfSuccess,
               failedPages: pdfFailed,
             });
           },
+          // 仿打印流水线逐帧写盘后检查取消，及时中断后续合成。
+          () => controller?.currentState === "cancelled",
         );
         logger.taskInfo(task.taskId, `仿打印合成完成，共生成 ${count} 张`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.taskWarn(task.taskId, `仿打印生成异常：${msg}`);
+    }
+  }
+
+  // 终态前最后一次取消检查：覆盖在最后阶段中途点取消的场景，
+  // 避免已导出的文件被误判为 completed、状态被 runQueue 覆盖回"取消前"。
+  if (controller) {
+    const shouldContinue = await controller.checkAndAwait();
+    if (!shouldContinue) {
+      logger.taskInfo(task.taskId, `任务已取消：${task.taskName}`);
+      return buildCancelledResult(task, pageResults, pdfPaths, startedAt);
     }
   }
 
@@ -726,6 +902,7 @@ export async function runTask(
 
   // 设置终态进度：所有阶段已完成，供 UI 展示完成过渡，避免任务间留白。
   // 下一个任务的 setProgress 会自然覆盖此状态。
+  progressThrottle.flush(); // 落地最后的 pending 进度并取消未触发定时器
   useTaskStore.getState().setProgress({
     taskId: task.taskId,
     plannedStages,

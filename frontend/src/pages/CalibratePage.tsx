@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo, useRef } from "react";
 import { useLocation, useNavigate, matchPath } from "react-router-dom";
 import type { BackgroundTemplate, CalibrationCorners } from "../types/background";
 import { getTemplate, saveCalibration, readBackgroundFile } from "../lib/printEngine/backgroundDb";
-import CornerCalibrator from "../components/background/CornerCalibrator";
+import CornerCalibrator, { computeDefaultCorners } from "../components/background/CornerCalibrator";
 import { cn } from "@/lib/utils";
 
 export default function CalibratePage() {
@@ -95,6 +95,10 @@ export default function CalibratePage() {
     }
   }
 
+  function handleReset() {
+    setCorners(computeDefaultCorners());
+  }
+
   async function handleSave() {
     if (!id || !corners) return;
     setSaving(true);
@@ -178,6 +182,13 @@ export default function CalibratePage() {
           )}
           <button
             type="button"
+            onClick={handleReset}
+            className="inline-flex items-center gap-1 rounded-lg border border-workspace-border bg-white px-3 py-2 text-xs font-medium text-workspace-fg-secondary shadow-sm transition hover:bg-slate-50"
+          >
+            重置
+          </button>
+          <button
+            type="button"
             onClick={handleSave}
             disabled={saving || !corners}
             className="inline-flex items-center gap-1.5 rounded-lg bg-workspace-accent px-4 py-2 text-xs font-medium text-white shadow-sm transition hover:bg-indigo-700 disabled:opacity-50"
@@ -197,7 +208,9 @@ export default function CalibratePage() {
       {imageUrl && template && (
         <div
           className={cn(
-            "relative flex-1 transition-opacity duration-300",
+            // 图片区须是 flex 容器，CornerCalibrator 根节点的 flex-1 才能拉伸高度；
+            // 否则高度链断裂，canvas 容器高度坍缩为 0，图片无法显示。
+            "relative flex flex-1 transition-opacity duration-300",
             loading ? "opacity-40" : "opacity-100",
           )}
         >

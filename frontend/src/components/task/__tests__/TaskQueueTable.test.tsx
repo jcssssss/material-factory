@@ -1,9 +1,21 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import type { ReactNode } from "react";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { TaskQueueTable } from "../TaskQueueTable";
 import { useTaskStore } from "../../../store/useTaskStore";
+
+// 开启 v7 future flags，避免 React Router Future Flag 警告刷屏
+function RouterWrapper({ children }: { children: ReactNode }) {
+  return (
+    <MemoryRouter
+      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+    >
+      {children}
+    </MemoryRouter>
+  );
+}
 
 beforeEach(() => {
   useTaskStore.setState({
@@ -36,7 +48,7 @@ const mockTask = (overrides: Record<string, any> = {}) => ({
 });
 
 function renderTable() {
-  return render(<TaskQueueTable />, { wrapper: MemoryRouter });
+  return render(<TaskQueueTable />, { wrapper: RouterWrapper });
 }
 
 describe("TaskQueueTable", () => {

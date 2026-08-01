@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { CalibrationCorners } from "../../../types/background";
 
 const invokeMock = vi.fn();
 
@@ -201,23 +202,36 @@ describe("composePrintImage", () => {
     expect(result[1]).toBe(0xd8);
   });
 
-  it("调用 invoke warp_to_a4 且传递 Uint8Array", async () => {
+  it("调用 invoke warp_to_a4，顶层传单个 Uint8Array 二进制 body", async () => {
     const materialBytes = new Uint8Array([0xff, 0xd9]);
+    const corners = [0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9] as const;
     await composePrintImage({
       worker,
       bgIndex: 0,
       bgW: 200,
       bgH: 300,
-      corners: [0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9],
+      corners: [...corners] as CalibrationCorners,
       materialBytes,
     });
 
-    expect(invokeMock).toHaveBeenCalledWith("warp_to_a4", {
-      materialBytes,
-      bgW: 200,
-      bgH: 300,
-      corners: [0.1, 0.1, 0.9, 0.1, 0.9, 0.9, 0.1, 0.9],
-    });
+    // 第二个参数是顶层 Uint8Array（Tauri 据此走 octet-stream 零序列化）。
+    expect(invokeMock).toHaveBeenCalledWith("warp_to_a4", expect.any(Uint8Array));
+    const arg = invokeMock.mock.calls.find(
+      (c) => c[0] === "warp_to_a4"
+    )?.[1] as Uint8Array;
+    expect(arg.byteLength).toBe(4 + materialBytes.length + 8 + 64);
+
+    // 按 Rust parse_warp_request 反解校验字段。
+    const dv = new DataView(arg.buffer, arg.byteOffset, arg.byteLength);
+    const len = dv.getUint32(0, true);
+    expect([...arg.subarray(4, 4 + len)]).toEqual([0xff, 0xd9]);
+    expect(dv.getUint32(4 + len, true)).toBe(200); // bgW
+    expect(dv.getUint32(8 + len, true)).toBe(300); // bgH
+    const parsedCorners: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      parsedCorners.push(dv.getFloat64(12 + len + i * 8, true));
+    }
+    expect(parsedCorners).toEqual(corners);
   });
 
   it("Worker 合成失败时向上抛出", async () => {

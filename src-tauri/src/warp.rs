@@ -1,6 +1,6 @@
 use image::{ImageBuffer, Rgb};
 use rayon::prelude::*;
-use tauri::{command, ipc::Response};
+use tauri::{command, ipc::{InvokeBody, Request, Response}};
 
 /// DLT 算法：从 4 组源→目标点对计算 3×3 Homography 矩阵。
 /// 设 h8 = 1，解 8×8 线性方程组，返回 [h0..h8]（行主序）。
@@ -209,17 +209,81 @@ fn warp_to_a4_bytes(
     Ok(warped)
 }
 
+/// 解析 warp_to_a4 的二进制 body。
+///
+/// 为什么用二进制 body：Tauri v2 的 invoke 在 args 为普通对象时会把嵌套的
+/// Uint8Array 在主线程同步 JSON.stringify 成数字数组（Array.from），一张 1~2MB
+/// 素材图 → 4~8MB JSON 字符串，主线程阻塞数百毫秒。改为顶层传单个 Uint8Array
+/// 走 octet-stream 零序列化，Rust 端手解。
+///
+/// body 格式（LE）：
+///   [4B u32 material_len][material_bytes][4B u32 bgW][4B u32 bgH][8×f64 corners]
+/// 总长 = 4 + material_len + 4 + 4 + 64。
+fn parse_warp_request(body: &[u8]) -> Result<(Vec<u8>, u32, u32, [f64; 8]), String> {
+    if body.len() < 4 + 8 + 64 {
+        return Err(format!("warp_to_a4 body 太短：{} 字节", body.len()));
+    }
+    let material_len = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let expected = 4 + material_len + 8 + 64;
+    if body.len() != expected {
+        return Err(format!(
+            "warp_to_a4 body 长度不匹配：期望 {expected}，实际 {}",
+            body.len()
+        ));
+    }
+
+    let material_bytes = body[4..4 + material_len].to_vec();
+    let mut off = 4 + material_len;
+    let bg_w = u32::from_le_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]);
+    let bg_h = u32::from_le_bytes([
+        body[off + 4],
+        body[off + 5],
+        body[off + 6],
+        body[off + 7],
+    ]);
+    if bg_w == 0 || bg_h == 0 {
+        return Err("warp_to_a4 背景尺寸必须为正".to_string());
+    }
+    off += 8;
+
+    let mut corners = [0.0f64; 8];
+    for (i, c) in corners.iter_mut().enumerate() {
+        let start = off + i * 8;
+        let bytes: [u8; 8] = body[start..start + 8]
+            .try_into()
+            .map_err(|_| "warp_to_a4 corners 读取失败".to_string())?;
+        *c = f64::from_le_bytes(bytes);
+    }
+    if corners.iter().any(|c| !c.is_finite()) {
+        return Err("warp_to_a4 corners 包含非有限值".to_string());
+    }
+
+    Ok((material_bytes, bg_w, bg_h, corners))
+}
+
 /// Tauri 命令：对资料图片做透视变形，返回 RGBA 字节。
 /// 用 Response 走二进制 IPC 通道，避免 Vec<u8> 被 JSON 序列化为数字数组。
+/// 入参用二进制 body（见 parse_warp_request），重计算放 spawn_blocking 线程池，
+/// 避免占用主线程与 IPC 异步运行时（同步命令默认在主线程执行）。
 #[command]
-pub fn warp_to_a4(
-    material_bytes: Vec<u8>,
-    bg_w: u32,
-    bg_h: u32,
-    corners: [f64; 8],
-) -> Result<Response, String> {
-    let bytes = warp_to_a4_bytes(&material_bytes, bg_w, bg_h, corners)?;
-    Ok(Response::new(bytes))
+pub async fn warp_to_a4(request: Request<'_>) -> Result<Response, String> {
+    let body: Vec<u8> = match request.body() {
+        InvokeBody::Raw(v) => v.clone(),
+        InvokeBody::Json(_) => {
+            return Err(
+                "warp_to_a4 需要 octet-stream 二进制 body，请用 invoke 顶层传 Uint8Array"
+                    .to_string(),
+            );
+        }
+    };
+    let (material_bytes, bg_w, bg_h, corners) = parse_warp_request(&body)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = warp_to_a4_bytes(&material_bytes, bg_w, bg_h, corners)?;
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("warp 后台执行失败：{e}"))?
 }
 
 #[cfg(test)]
@@ -391,5 +455,62 @@ mod tests {
         }
 
         assert_eq!(parallel, scalar, "并行 warp 与单线程结果应逐字节一致");
+    }
+
+    /// 构造一个合法 warp_to_a4 二进制 body（与前端 warpBodyCodec 格式一致）。
+    fn make_valid_body(material: &[u8], bg_w: u32, bg_h: u32, corners: &[f64; 8]) -> Vec<u8> {
+        let mut body = Vec::with_capacity(4 + material.len() + 8 + 64);
+        body.extend_from_slice(&(material.len() as u32).to_le_bytes());
+        body.extend_from_slice(material);
+        body.extend_from_slice(&bg_w.to_le_bytes());
+        body.extend_from_slice(&bg_h.to_le_bytes());
+        for c in corners.iter() {
+            body.extend_from_slice(&c.to_le_bytes());
+        }
+        body
+    }
+
+    #[test]
+    fn test_parse_warp_request_ok() {
+        let material = vec![0xff, 0xd8, 0xff, 0xd9];
+        let corners: [f64; 8] = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        let body = make_valid_body(&material, 1242, 1656, &corners);
+        let (m, w, h, c) = parse_warp_request(&body).unwrap();
+        assert_eq!(m, material);
+        assert_eq!(w, 1242);
+        assert_eq!(h, 1656);
+        assert_eq!(c, corners);
+    }
+
+    #[test]
+    fn test_parse_warp_request_too_short() {
+        let err = parse_warp_request(&[0, 0, 0, 0]).unwrap_err();
+        assert!(err.contains("太短"), "实际：{err}");
+    }
+
+    #[test]
+    fn test_parse_warp_request_len_mismatch() {
+        // material_len 声明 10 字节，实际 3 字节。
+        let mut body = vec![10, 0, 0, 0, 1, 2, 3];
+        body.extend_from_slice(&[0u8; 8 + 64]);
+        let err = parse_warp_request(&body).unwrap_err();
+        assert!(err.contains("长度不匹配"), "实际：{err}");
+    }
+
+    #[test]
+    fn test_parse_warp_request_zero_bg() {
+        let corners: [f64; 8] = [0.0; 8];
+        let body = make_valid_body(&[1, 2, 3], 0, 1656, &corners);
+        let err = parse_warp_request(&body).unwrap_err();
+        assert!(err.contains("必须为正"), "实际：{err}");
+    }
+
+    #[test]
+    fn test_parse_warp_request_non_finite_corner() {
+        let mut corners: [f64; 8] = [0.0; 8];
+        corners[3] = f64::NAN;
+        let body = make_valid_body(&[1, 2, 3], 1242, 1656, &corners);
+        let err = parse_warp_request(&body).unwrap_err();
+        assert!(err.contains("非有限"), "实际：{err}");
     }
 }

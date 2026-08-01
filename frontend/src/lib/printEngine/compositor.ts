@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { embedJfif300Dpi, isPreviewImage } from "../exportImage";
+import { embedJfifDpi, isPreviewImage, TARGET_DPI, writeImageToDisk } from "../exportImage";
 import type { CalibrationCorners, BackgroundTemplate } from "../../types/background";
 import type { FolderTreeNode } from "../../types/materialList";
 import { readBackgroundFile } from "./backgroundDb";
@@ -16,19 +16,34 @@ const COMPOSE_WORKER_CODE = `
 var W = 1242;
 var H = 1656;
 var bgCache = null;  // { bitmaps: ImageBitmap[], widths: number[], heights: number[] }
+// 一次性分配的复用对象（init 时创建，后续 compose 复用，避免每帧重建大对象）：
+var mainCanvas = null;   // OffscreenCanvas(W, H)，合成目标
+var mainCtx = null;      // mainCanvas 的 2D 上下文
+var scratchCanvas = null; // OffscreenCanvas(bgW, bgH)，承载 warp 像素，参与 multiply
+var scratchCtx = null;    // scratchCanvas 的 2D 上下文
+var warpData = null;      // ImageData(bgW, bgH)，持久缓冲，每帧 data.set 复用
 
 self.onmessage = async function(e) {
   var msg = e.data;
   var reqId = msg.reqId;
 
   if (msg.type === 'init') {
-    var bufs = msg.bgBufs;
-    var bitmaps = [];
-    for (var i = 0; i < bufs.length; i++) {
-      bitmaps.push(await createImageBitmap(new Blob([bufs[i]])));
+    try {
+      var bufs = msg.bgBufs;
+      var bitmaps = [];
+      for (var i = 0; i < bufs.length; i++) {
+        bitmaps.push(await createImageBitmap(new Blob([bufs[i]])));
+      }
+      bgCache = { bitmaps: bitmaps, widths: msg.bgWidths, heights: msg.bgHeights };
+      mainCanvas = new OffscreenCanvas(W, H);
+      mainCtx = mainCanvas.getContext('2d');
+      if (!mainCtx) {
+        throw new Error('无法获取 2D Canvas 上下文');
+      }
+      self.postMessage({ type: 'ready', reqId: reqId });
+    } catch (err) {
+      self.postMessage({ type: 'error', reqId: reqId, message: err.message || String(err) });
     }
-    bgCache = { bitmaps: bitmaps, widths: msg.bgWidths, heights: msg.bgHeights };
-    self.postMessage({ type: 'ready', reqId: reqId });
     return;
   }
 
@@ -39,21 +54,27 @@ self.onmessage = async function(e) {
       var bgW = bgCache.widths[bgIdx];
       var bgH = bgCache.heights[bgIdx];
 
-      var warped = await createImageBitmap(
-        new ImageData(new Uint8ClampedArray(msg.warpedBuf), bgW, bgH)
-      );
-      // WebView 在 GPU/内存紧张时偶发返回 null 2D 上下文，重试新建 canvas 防御。
-      var ctx = null;
-      for (var attempt = 0; attempt < 3 && !ctx; attempt++) {
-        if (attempt > 0) {
-          await new Promise(function(r) { setTimeout(r, 150 * attempt); });
+      // 防御：主画布异常被回收时重建（WebView 内存紧张时 getContext 可能返回 null）。
+      if (mainCanvas === null || mainCtx === null) {
+        mainCanvas = new OffscreenCanvas(W, H);
+        mainCtx = mainCanvas.getContext('2d');
+        if (!mainCtx) {
+          throw new Error('无法获取 2D Canvas 上下文');
         }
-        var canvas = new OffscreenCanvas(W, H);
-        ctx = canvas.getContext('2d');
       }
-      if (!ctx) {
-        throw new Error('无法获取 2D Canvas 上下文');
+
+      // warp 像素按需持久化：尺寸未变时复用 ImageData 与 scratch 画布，
+      // 省掉每帧 new ImageData（8.2MB 拷贝）+ createImageBitmap（GPU 上传）+ 画布分配。
+      if (scratchCanvas === null || scratchCanvas.width !== bgW || scratchCanvas.height !== bgH) {
+        scratchCanvas = new OffscreenCanvas(bgW, bgH);
+        scratchCtx = scratchCanvas.getContext('2d');
+        warpData = new ImageData(bgW, bgH);
+        if (!scratchCtx) {
+          throw new Error('无法获取 scratch 2D Canvas 上下文');
+        }
       }
+      warpData.data.set(new Uint8ClampedArray(msg.warpedBuf));
+      scratchCtx.putImageData(warpData, 0, 0);
 
       var scale = Math.min(W / bgW, H / bgH);
       var dw = Math.round(bgW * scale);
@@ -61,19 +82,21 @@ self.onmessage = async function(e) {
       var ox = Math.floor((W - dw) / 2);
       var oy = Math.floor((H - dh) / 2);
 
-      ctx.fillStyle = '#ffffff';
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.fillRect(0, 0, W, H);
-      ctx.drawImage(bg, ox, oy, dw, dh);
+      // 每帧从干净状态开始：显式复位合成模式，避免上一帧 multiply 残留串色。
+      mainCtx.globalCompositeOperation = 'source-over';
+      mainCtx.fillStyle = '#ffffff';
+      mainCtx.imageSmoothingEnabled = true;
+      mainCtx.imageSmoothingQuality = 'high';
+      mainCtx.fillRect(0, 0, W, H);
+      mainCtx.drawImage(bg, ox, oy, dw, dh);
 
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.drawImage(warped, 0, 0, W, H);
+      mainCtx.globalCompositeOperation = 'multiply';
+      mainCtx.drawImage(scratchCanvas, 0, 0, W, H);
+      mainCtx.globalCompositeOperation = 'source-over'; // 复位，防串帧
 
-      var blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 1.0 });
+      var blob = await mainCanvas.convertToBlob({ type: 'image/jpeg', quality: 1.0 });
       var buf = await blob.arrayBuffer();
       self.postMessage({ type: 'result', reqId: reqId, buffer: buf }, [buf]);
-      warped.close();
     } catch (err) {
       self.postMessage({ type: 'error', reqId: reqId, message: err.message || String(err) });
     }
@@ -184,6 +207,26 @@ function composeInWorker(
 
 // ─── 对外 API ───
 
+// 构造 warp_to_a4 二进制请求 body（LE，与 Rust parse_warp_request 对账）：
+//   [4B u32 material_len][material_bytes][4B u32 bgW][4B u32 bgH][8×f64 corners]
+export function buildWarpRequestBody(
+  materialBytes: Uint8Array,
+  bgW: number,
+  bgH: number,
+  corners: CalibrationCorners,
+): Uint8Array {
+  const body = new Uint8Array(4 + materialBytes.length + 8 + 64);
+  const dv = new DataView(body.buffer);
+  dv.setUint32(0, materialBytes.length, true);
+  body.set(materialBytes, 4);
+  dv.setUint32(4 + materialBytes.length, bgW, true);
+  dv.setUint32(8 + materialBytes.length, bgH, true);
+  for (let i = 0; i < 8; i++) {
+    dv.setFloat64(12 + materialBytes.length + i * 8, corners[i], true);
+  }
+  return body;
+}
+
 export async function composePrintImage(params: {
   worker: Worker;
   bgIndex: number;
@@ -194,17 +237,15 @@ export async function composePrintImage(params: {
 }): Promise<Uint8Array> {
   const { worker, bgIndex, bgW, bgH, corners, materialBytes } = params;
 
-  const warpedBuffer = await invoke<ArrayBuffer>("warp_to_a4", {
-    materialBytes,
-    bgW,
-    bgH,
-    corners,
-  });
+  // 素材字节走顶层二进制 body，避免嵌套 Uint8Array 被 Tauri 转 JSON 数字数组
+  // 在主线程同步序列化（每张 4~8MB JSON，阻塞数百毫秒）。
+  const body = buildWarpRequestBody(materialBytes, bgW, bgH, corners);
+  const warpedBuffer = await invoke<ArrayBuffer>("warp_to_a4", body);
 
   // Canvas 合成 + JPEG 编码：在 Worker 中执行，主线程不阻塞。
   const jpegBuffer = await composeInWorker(worker, warpedBuffer, bgIndex);
 
-  return embedJfif300Dpi(new Uint8Array(jpegBuffer));
+  return embedJfifDpi(new Uint8Array(jpegBuffer), TARGET_DPI);
 }
 
 function joinPath(...segments: string[]): string {
@@ -225,25 +266,14 @@ export function collectJpgFiles(node: FolderTreeNode): { name: string; path: str
   return result;
 }
 
-// 将路径编码到二进制 body 前缀：4 字节 LE 路径长度 + UTF-8 路径 + JPEG。
-// invoke 顶层传 Uint8Array → Tauri 走 octet-stream 零序列化，避免主线程 JSON 卡顿。
-async function writeImageToDisk(outPath: string, jpegBytes: Uint8Array): Promise<void> {
-  const encoder = new TextEncoder();
-  const pathBytes = encoder.encode(outPath);
-  const len = pathBytes.length;
-  const header = new Uint8Array(4);
-  new DataView(header.buffer).setUint32(0, len, true); // LE
-  const combined = new Uint8Array(4 + len + jpegBytes.length);
-  combined.set(header, 0);
-  combined.set(pathBytes, 4);
-  combined.set(jpegBytes, 4 + len);
-  await invoke<void>("write_image_binary", combined);
-}
+// 写盘复用 exportImage 的 writeImageToDisk（同一二进制 body 方案）。
+// 之前此处有私有副本，与 exportImage.ts 完全重复，统一收口避免漂移。
 
 export async function generatePrintImages(
   taskOutputDir: string,
   backgrounds: BackgroundTemplate[],
   onProgress?: (done: number, total: number) => void,
+  shouldStop?: () => boolean,
 ): Promise<number> {
   const tree = await invoke<FolderTreeNode>("scan_folder_tree", { folder: taskOutputDir });
   const materialFiles = collectJpgFiles(tree);
@@ -322,6 +352,11 @@ export async function generatePrintImages(
       onProgress?.(++nextWrite, materialFiles.length);
 
       window.shift();
+      // 取消检查：不再生成后续帧，并让在途帧 settle，避免 unhandled rejection。
+      if (shouldStop?.()) {
+        await Promise.allSettled(window.map((f) => f.promise));
+        break;
+      }
       // 补一张新帧进窗口，直到素材用完。
       if (nextStart < materialFiles.length) {
         window.push(await frameFor(nextStart++));

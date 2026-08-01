@@ -38,6 +38,7 @@ jobs:
             libssl-dev \
             libsoup-3.0-dev \
             libjavascriptcoregtk-4.1-dev \
+            cmake \
             pkg-config
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

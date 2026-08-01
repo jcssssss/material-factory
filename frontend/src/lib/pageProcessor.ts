@@ -33,6 +33,11 @@ export interface PageProcessor {
   // 失败时抛出异常，taskRunner 会捕获并标记该 PDF 失败。
   prepareWorkItem(task: TaskConfig, pdfPath: string): Promise<PdfWorkItem>;
 
+  // 渲染前按需加载 PDF 文档（预扫描阶段不缓存 doc，渲染阶段逐 PDF 加载，
+  // 避免整批 PDF 文档 + pdf.js worker 同时常驻内存）。
+  // 加载失败抛出异常，taskRunner 会捕获并标记该 PDF 失败。
+  openDocument(pdfPath: string): Promise<void>;
+
   // 渲染并导出单页图片。
   // 成功返回 PageResult（status: success, outputPath 已填写）。
   // 失败时抛出异常，taskRunner 会捕获并生成 PageResult（status: failed）。

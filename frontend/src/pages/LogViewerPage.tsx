@@ -2,7 +2,16 @@ import { useMemo, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useTaskStore } from "../store/useTaskStore";
 import { EmptyState } from "../components/common/EmptyState";
+import { Tip } from "../components/common/Tip";
 import { ToneBadge } from "../components/common/StatusBadge";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "../components/ui/table";
 import InfiniteScrollSentinel from "../components/common/InfiniteScrollSentinel";
 import { useInfiniteScroll } from "../lib/useInfiniteScroll";
 import type { LogLevel, LogScope } from "../types/task";
@@ -140,49 +149,57 @@ export default function LogViewerPage() {
           </div>
         ) : (
           <div className="h-full overflow-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="sticky top-0 z-10">
-                <tr className="border-b bg-muted/60 text-xs font-medium text-muted-foreground">
-                  <th className="whitespace-nowrap px-4 py-2.5 font-medium">时间</th>
-                  <th className="px-4 py-2.5 font-medium">级别</th>
-                  <th className="px-4 py-2.5 font-medium">范围</th>
-                  <th className="px-4 py-2.5 font-medium">任务 ID</th>
-                  <th className="px-4 py-2.5 font-medium">消息</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/40">
+            <Table className="text-xs">
+              <TableHeader className="sticky top-0 z-10">
+                <TableRow className="bg-muted/60 backdrop-blur">
+                  <TableHead className="py-2.5">时间</TableHead>
+                  <TableHead className="py-2.5">级别</TableHead>
+                  <TableHead className="w-16 py-2.5">范围</TableHead>
+                  <TableHead className="py-2.5">任务 ID</TableHead>
+                  <TableHead className="py-2.5">消息</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {visibleLogs.map((log, idx) => (
-                  <tr key={idx} className="transition-colors hover:bg-muted/30">
-                    <td className="whitespace-nowrap px-4 py-2.5 font-mono text-muted-foreground">
+                  <TableRow key={idx}>
+                    <TableCell className="whitespace-nowrap py-2.5 font-mono text-muted-foreground">
                       {log.timestamp}
-                    </td>
-                    <td className="px-4 py-2.5">
+                    </TableCell>
+                    <TableCell className="py-2.5">
                       <ToneBadge tone={LEVEL_TONE[log.level]}>
                         {log.level.toUpperCase()}
                       </ToneBadge>
-                    </td>
-                    <td className="px-4 py-2.5 text-muted-foreground">
+                    </TableCell>
+                    <TableCell className="w-16 whitespace-nowrap py-2.5 text-muted-foreground">
                       {SCOPE_LABEL[log.scope]}
-                    </td>
-                    <td className="px-4 py-2.5">
+                    </TableCell>
+                    <TableCell className="py-2.5">
                       {log.taskId ? (
-                        <button
-                          type="button"
-                          onClick={() => copyTaskId(log.taskId!)}
-                          className="font-mono text-[10px] text-muted-foreground/60 hover:text-foreground transition-colors"
-                          title="点击复制任务 ID"
+                        <Tip
+                          label={
+                            <span className="block">
+                              {log.taskId}
+                              <span className="mt-0.5 block text-muted-foreground">点击复制</span>
+                            </span>
+                          }
                         >
-                          {copiedId === log.taskId ? "已复制" : `${log.taskId.slice(0, 8)}…`}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => copyTaskId(log.taskId!)}
+                            className="font-mono text-[10px] text-muted-foreground/60 hover:text-primary transition-colors"
+                          >
+                            {copiedId === log.taskId ? "已复制" : `${log.taskId.slice(0, 8)}…`}
+                          </button>
+                        </Tip>
                       ) : null}
-                    </td>
-                    <td className="min-w-0 break-words px-4 py-2.5 font-mono text-foreground/80">
+                    </TableCell>
+                    <TableCell className="min-w-0 break-words py-2.5 font-mono text-foreground/80">
                       {log.message}
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
             <InfiniteScrollSentinel ref={sentinelRef} hasMore={hasMore} />
           </div>
         )}

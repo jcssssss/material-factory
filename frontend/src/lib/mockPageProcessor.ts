@@ -37,6 +37,10 @@ export class MockPageProcessor implements PageProcessor {
     return [];
   }
 
+  async openDocument(_pdfPath: string): Promise<void> {
+    // mock：无需真实加载 PDF 文档。
+  }
+
   async prepareWorkItem(
     task: TaskConfig,
     pdfPath: string

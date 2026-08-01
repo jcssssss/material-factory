@@ -3,6 +3,7 @@ use image::imageops::FilterType;
 use image::RgbaImage;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, Manager, State};
 use tauri::ipc::{InvokeBody, Request, Response};
@@ -17,6 +18,8 @@ pub struct SaveBackgroundResult {
     file_name: String,
     width: u32,
     height: u32,
+    // 处理后的 JPEG 大小（1242×1656 缩放产物），供前端展示最终尺寸。
+    file_size: u64,
 }
 
 fn thumbnail_file_name(original: &str) -> String {
@@ -83,9 +86,83 @@ struct ProcessedBackground {
 
 /// 将任意尺寸的背景图片处理为 1242×1656 JPG，并基于同一次解码生成缩略图。
 /// 3:4 图片直接缩放；其他比例等比缩放后居中放置，白底补齐。
+// libheif 静态编译（embedded-libheif）在 Rust 内解码 HEIC → image::DynamicImage。
+// 分发时无需用户预装 libheif；失败时由调用方回退 sips。
+fn decode_heic_via_libheif(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    use libheif_rs::{ColorSpace, HeifContext, LibHeif, RgbChroma};
+
+    let ctx = HeifContext::read_from_bytes(bytes)
+        .map_err(|e| format!("libheif 解析失败：{e}"))?;
+    let handle = ctx
+        .primary_image_handle()
+        .map_err(|e| format!("libheif 取主图失败：{e}"))?;
+    let heif_image = LibHeif::new()
+        .decode(&handle, ColorSpace::Rgb(RgbChroma::Rgb), None)
+        .map_err(|e| format!("libheif 解码失败：{e}"))?;
+    let plane = heif_image
+        .planes()
+        .interleaved
+        .ok_or_else(|| "无法获取 HEIC RGB 像素".to_string())?;
+    // 行可能有 stride 对齐填充，逐行拷贝去除 padding。
+    let width = plane.width as usize;
+    let height = plane.height as usize;
+    let stride = plane.stride;
+    let row_bytes = width * 3;
+    let mut rgb = Vec::with_capacity(row_bytes * height);
+    for row in 0..height {
+        let start = row * stride;
+        rgb.extend_from_slice(&plane.data[start..start + row_bytes]);
+    }
+    image::RgbImage::from_raw(width as u32, height as u32, rgb)
+        .map(image::DynamicImage::ImageRgb8)
+        .ok_or_else(|| "HEIC 像素尺寸无效".to_string())
+}
+
+// macOS 内置 sips 转换 HEIC/HEIF → JPEG，用于 image crate 无法解码的格式。
+// 仅 macOS 可用（Windows 无 HEIC 原生解码器，报清晰错误）。
+fn decode_heic_via_sips(bytes: &[u8]) -> Result<image::DynamicImage, String> {
+    if cfg!(not(target_os = "macos")) {
+        return Err("HEIC 图片当前仅支持 macOS 解码".into());
+    }
+    // sips 需要真实文件路径，写入临时文件后转换。
+    let tmp = std::env::temp_dir().join(format!(
+        "xhs_bg_{}.heic",
+        generate_background_id()
+    ));
+    let out = tmp.with_extension("jpg");
+    fs::write(&tmp, bytes).map_err(|e| format!("写入临时 HEIC 失败：{e}"))?;
+    let status = Command::new("sips")
+        .args(["-s", "format", "jpeg"])
+        .arg(&tmp)
+        .arg("--out")
+        .arg(&out)
+        .status()
+        .map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("调用 sips 失败：{e}")
+        })?;
+    let _ = fs::remove_file(&tmp);
+    if !status.success() {
+        let _ = fs::remove_file(&out);
+        return Err("sips 转换失败".into());
+    }
+    let jpeg = fs::read(&out).map_err(|e| {
+        let _ = fs::remove_file(&out);
+        format!("读取转换结果失败：{e}")
+    })?;
+    let _ = fs::remove_file(&out);
+    image::load_from_memory(&jpeg).map_err(|e| format!("转换后图片解码失败：{e}"))
+}
+
 fn process_background_image(bytes: &[u8]) -> Result<ProcessedBackground, String> {
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| format!("解码图片失败：{e}"))?;
+    // image crate 不原生支持 HEIC/HEIF（iPhone 默认格式）：
+    // 优先 libheif（静态编译，快），失败回退 macOS sips。
+    let img = match image::load_from_memory(bytes) {
+        Ok(i) => i,
+        Err(e) => decode_heic_via_libheif(bytes)
+            .or_else(|_| decode_heic_via_sips(bytes))
+            .map_err(|heic_err| format!("解码图片失败：{e}（HEIC 解码失败：{heic_err}）"))?,
+    };
     let (w, h) = (img.width(), img.height());
     if w == 0 || h == 0 {
         return Err("图片尺寸无效".into());
@@ -144,6 +221,22 @@ pub async fn save_background_file(
         .map_err(|e| format!("后台处理失败：{e}"))?
 }
 
+/// 直接按路径上传并处理为 1242×1656：内部 fs::read + save_background_file_sync，
+/// 前端只传路径字符串，避免把原图字节在前端中转（减少一次大字节 IPC 往返）。
+#[command]
+pub async fn save_background_file_from_path(
+    app: AppHandle,
+    path: String,
+) -> Result<SaveBackgroundResult, String> {
+    // 读字节 + 处理放阻塞线程池执行，避免占用主线程/IPC 异步运行时。
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = fs::read(&path).map_err(|e| format!("读取图片失败：{path} - {e}"))?;
+        save_background_file_sync(&app, bytes)
+    })
+    .await
+    .map_err(|e| format!("后台处理失败：{e}"))?
+}
+
 fn save_background_file_sync(
     app: &AppHandle,
     bytes: Vec<u8>,
@@ -165,41 +258,53 @@ fn save_background_file_sync(
         file_name,
         width: processed.width,
         height: processed.height,
+        file_size: processed.bytes.len() as u64,
     })
 }
 
 #[command]
-pub fn read_background_file(
+pub async fn read_background_file(
     app: AppHandle,
     file_name: String,
 ) -> Result<Response, String> {
-    let dir = backgrounds_dir(&app)?;
-    let file_path = dir.join(&file_name);
+    // fs::read 放阻塞线程池执行，避免占用主线程/IPC 异步运行时。
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = backgrounds_dir(&app)?;
+        let file_path = dir.join(&file_name);
 
-    if !file_path.exists() {
-        return Err(format!("背景文件不存在：{file_name}"));
-    }
+        if !file_path.exists() {
+            return Err(format!("背景文件不存在：{file_name}"));
+        }
 
-    let bytes = fs::read(&file_path).map_err(|e| format!("读取背景文件失败：{e}"))?;
-    Ok(Response::new(bytes))
+        let bytes = fs::read(&file_path).map_err(|e| format!("读取背景文件失败：{e}"))?;
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("读取背景文件后台执行失败：{e}"))?
 }
 
 /// 读取缓存的缩略图。若不存在则报错（由 ensure 命令预先批量生成）。
 /// 走二进制通道（tauri::ipc::Response），避免 JSON 序列化 Vec<u8>。
+/// async + spawn_blocking：列表页多卡片并发拉缩略图时，fs::read 在阻塞线程池执行，
+/// 避免占用主线程/IPC 异步运行时导致列表滚动卡顿。
 #[command]
-pub fn read_background_thumbnail(
+pub async fn read_background_thumbnail(
     app: AppHandle,
     file_name: String,
 ) -> Result<Response, String> {
-    let dir = backgrounds_dir(&app)?;
-    let thumb_path = dir.join(thumbnail_file_name(&file_name));
+    tauri::async_runtime::spawn_blocking(move || {
+        let dir = backgrounds_dir(&app)?;
+        let thumb_path = dir.join(thumbnail_file_name(&file_name));
 
-    if !thumb_path.exists() {
-        return Err(format!("缩略图不存在：{}", thumbnail_file_name(&file_name)));
-    }
+        if !thumb_path.exists() {
+            return Err(format!("缩略图不存在：{}", thumbnail_file_name(&file_name)));
+        }
 
-    let bytes = fs::read(&thumb_path).map_err(|e| format!("读取缩略图失败：{e}"))?;
-    Ok(Response::new(bytes))
+        let bytes = fs::read(&thumb_path).map_err(|e| format!("读取缩略图失败：{e}"))?;
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("读取缩略图后台执行失败：{e}"))?
 }
 
 /// 批量补齐所有缺失的缩略图，返回实际生成的缩略图数量。

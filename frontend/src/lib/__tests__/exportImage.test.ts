@@ -16,25 +16,25 @@ import {
   BACKGROUND_COLOR,
   calculateFitScale,
   composeToPortraitCanvas,
-  embedJfif300Dpi,
+  embedJfifDpi,
   buildPageImageFileName,
   isPreviewImage,
 } from "../exportImage";
 
 describe("输出规格常量", () => {
   it("OUTPUT_WIDTH / OUTPUT_HEIGHT 比例为 3:4", () => {
-    // 2475 / 3300 = 0.75 = 3/4
+    // 1242 / 1656 = 0.75 = 3/4
     expect(OUTPUT_WIDTH / OUTPUT_HEIGHT).toBe(3 / 4);
-    expect(OUTPUT_WIDTH).toBe(2475);
-    expect(OUTPUT_HEIGHT).toBe(3300);
+    expect(OUTPUT_WIDTH).toBe(1242);
+    expect(OUTPUT_HEIGHT).toBe(1656);
   });
 
   it("JPEG_QUALITY = 1.0（100%）", () => {
     expect(JPEG_QUALITY).toBe(1.0);
   });
 
-  it("TARGET_DPI = 300", () => {
-    expect(TARGET_DPI).toBe(300);
+  it("TARGET_DPI = 150", () => {
+    expect(TARGET_DPI).toBe(150);
   });
 
   it("BACKGROUND_COLOR = #ffffff（白底补边）", () => {
@@ -45,30 +45,30 @@ describe("输出规格常量", () => {
 describe("calculateFitScale", () => {
   it("纵向页面（3:4）：scale 使其刚好填满目标", () => {
     // 3:4 源图正好匹配 3:4 目标
-    const scale = calculateFitScale(2475, 3300);
+    const scale = calculateFitScale(1242, 1656);
     expect(scale).toBeCloseTo(1, 5);
   });
 
   it("横向页面：取 min(scale_x, scale_y)，保证完整放入", () => {
-    // 4:3 横向页面 4000x3000 → 目标 2475x3300
-    // scale_x = 2475/4000 = 0.61875
-    // scale_y = 3300/3000 = 1.1
-    // min = 0.61875（按宽度缩放，高度方向留白）
+    // 4:3 横向页面 4000x3000 → 目标 1242x1656
+    // scale_x = 1242/4000 = 0.3105
+    // scale_y = 1656/3000 = 0.552
+    // min = 0.3105（按宽度缩放，高度方向留白）
     const scale = calculateFitScale(4000, 3000);
-    expect(scale).toBeCloseTo(0.61875, 5);
+    expect(scale).toBeCloseTo(0.3105, 5);
   });
 
   it("正方形页面：按高度缩放，左右留白", () => {
-    // 3000x3000 → scale_x = 2475/3000 = 0.825, scale_y = 3300/3000 = 1.1
-    // min = 0.825
+    // 3000x3000 → scale_x = 1242/3000 = 0.414, scale_y = 1656/3000 = 0.552
+    // min = 0.414
     const scale = calculateFitScale(3000, 3000);
-    expect(scale).toBeCloseTo(0.825, 5);
+    expect(scale).toBeCloseTo(0.414, 5);
   });
 
   it("小尺寸页面：放大到目标", () => {
-    // 100x100 → scale = min(24.75, 33) = 24.75
+    // 100x100 → scale = min(12.42, 16.56) = 12.42
     const scale = calculateFitScale(100, 100);
-    expect(scale).toBeCloseTo(24.75, 5);
+    expect(scale).toBeCloseTo(12.42, 5);
   });
 
   it("非法尺寸抛异常", () => {
@@ -137,7 +137,7 @@ describe("isPreviewImage", () => {
   });
 });
 
-describe("embedJfif300Dpi", () => {
+describe("embedJfifDpi", () => {
   // 构造一个最小合法 JPG：SOI + 默认 APP0（density=0）+ EOI
   function makeJpegWithDefaultApp0(): Uint8Array {
     // FF D8                          SOI
@@ -165,9 +165,9 @@ describe("embedJfif300Dpi", () => {
     ]);
   }
 
-  it("替换已有 APP0 段为 300 DPI", () => {
+  it("替换已有 APP0 段为 150 DPI", () => {
     const input = makeJpegWithDefaultApp0();
-    const output = embedJfif300Dpi(input);
+    const output = embedJfifDpi(input, 150);
 
     // SOI marker 保留
     expect(output[0]).toBe(0xff);
@@ -191,22 +191,22 @@ describe("embedJfif300Dpi", () => {
     // 密度单位 = 1（DPI）
     expect(output[13]).toBe(0x01);
 
-    // X 密度 = 300 (0x012C)
-    expect(output[14]).toBe(0x01);
-    expect(output[15]).toBe(0x2c);
+    // X 密度 = 150 (0x0096)
+    expect(output[14]).toBe(0x00);
+    expect(output[15]).toBe(0x96);
 
-    // Y 密度 = 300 (0x012C)
-    expect(output[16]).toBe(0x01);
-    expect(output[17]).toBe(0x2c);
+    // Y 密度 = 150 (0x0096)
+    expect(output[16]).toBe(0x00);
+    expect(output[17]).toBe(0x96);
 
     // EOI 保留在末尾
     expect(output[output.length - 2]).toBe(0xff);
     expect(output[output.length - 1]).toBe(0xd9);
   });
 
-  it("无 APP0 段时插入新的 300 DPI JFIF 段", () => {
+  it("无 APP0 段时插入新的 150 DPI JFIF 段", () => {
     const input = makeJpegWithoutApp0();
-    const output = embedJfif300Dpi(input);
+    const output = embedJfifDpi(input, 150);
 
     // SOI 保留
     expect(output[0]).toBe(0xff);
@@ -216,11 +216,11 @@ describe("embedJfif300Dpi", () => {
     expect(output[2]).toBe(0xff);
     expect(output[3]).toBe(0xe0);
 
-    // 密度 = 300 DPI
-    expect(output[14]).toBe(0x01);
-    expect(output[15]).toBe(0x2c);
-    expect(output[16]).toBe(0x01);
-    expect(output[17]).toBe(0x2c);
+    // 密度 = 150 DPI
+    expect(output[14]).toBe(0x00);
+    expect(output[15]).toBe(0x96);
+    expect(output[16]).toBe(0x00);
+    expect(output[17]).toBe(0x96);
 
     // EOI 保留
     expect(output[output.length - 2]).toBe(0xff);
@@ -229,23 +229,34 @@ describe("embedJfif300Dpi", () => {
 
   it("非法 JPG（缺少 SOI）抛异常", () => {
     const bad = new Uint8Array([0x00, 0x00]);
-    expect(() => embedJfif300Dpi(bad)).toThrow(/SOI/);
+    expect(() => embedJfifDpi(bad, 150)).toThrow(/SOI/);
   });
 
-  it("300 DPI 数值正确（0x012C = 300）", () => {
+  it("非法 DPI 值抛异常", () => {
     const input = makeJpegWithDefaultApp0();
-    const output = embedJfif300Dpi(input);
-    const xDpi = (output[14] << 8) | output[15];
-    const yDpi = (output[16] << 8) | output[17];
-    expect(xDpi).toBe(300);
-    expect(yDpi).toBe(300);
+    expect(() => embedJfifDpi(input, 0)).toThrow(/DPI/);
+    expect(() => embedJfifDpi(input, -1)).toThrow(/DPI/);
+    expect(() => embedJfifDpi(input, 1.5)).toThrow(/DPI/);
+  });
+
+  it("DPI 数值正确（0x0096 = 150，0x012C = 300）", () => {
+    const input = makeJpegWithDefaultApp0();
+    const output150 = embedJfifDpi(input, 150);
+    const x150 = (output150[14] << 8) | output150[15];
+    const y150 = (output150[16] << 8) | output150[17];
+    expect(x150).toBe(150);
+    expect(y150).toBe(150);
+
+    const output300 = embedJfifDpi(input, 300);
+    const x300 = (output300[14] << 8) | output300[15];
+    expect(x300).toBe(300);
   });
 });
 
 describe("composeToPortraitCanvas", () => {
   // jsdom 不实现 Canvas 2D 渲染，通过 mock 验证：
-  //   1. 目标画布尺寸 = 2475 x 3300
-  //   2. 背景填充调用 fillRect(0, 0, 2475, 3300)
+  //   1. 目标画布尺寸 = 1242 x 1656
+  //   2. 背景填充调用 fillRect(0, 0, 1242, 1656)
   //   3. drawImage 居中调用（offsetX = (W - drawW) / 2, offsetY = (H - drawH) / 2）
 
   beforeEach(() => {
@@ -261,7 +272,7 @@ describe("composeToPortraitCanvas", () => {
     HTMLCanvasElement.prototype.getContext = vi.fn(() => ctxMock);
   });
 
-  it("目标画布尺寸为 3:4 (2475x3300)", () => {
+  it("目标画布尺寸为 3:4 (1242x1656)", () => {
     const source = document.createElement("canvas");
     source.width = 1000;
     source.height = 1000;
@@ -282,10 +293,10 @@ describe("composeToPortraitCanvas", () => {
   });
 
   it("正方形源图居中放置（左右留白）", () => {
-    // 1000x1000 源图 → scale = min(2.475, 3.3) = 2.475
-    // drawW = 2475, drawH = 2475
-    // offsetX = (2475 - 2475) / 2 = 0
-    // offsetY = (3300 - 2475) / 2 = 412.5 → floor = 412
+    // 1000x1000 源图 → scale = min(1.242, 1.656) = 1.242
+    // drawW = 1242, drawH = 1242
+    // offsetX = (1242 - 1242) / 2 = 0
+    // offsetY = (1656 - 1242) / 2 = 207
     const source = document.createElement("canvas");
     source.width = 1000;
     source.height = 1000;
@@ -300,17 +311,17 @@ describe("composeToPortraitCanvas", () => {
     expect(args[3]).toBe(1000); // sw
     expect(args[4]).toBe(1000); // sh
     expect(args[5]).toBe(0); // dx = offsetX
-    expect(args[6]).toBe(412); // dy = offsetY
-    expect(args[7]).toBe(2475); // dw
-    expect(args[8]).toBe(2475); // dh
+    expect(args[6]).toBe(207); // dy = offsetY
+    expect(args[7]).toBe(1242); // dw
+    expect(args[8]).toBe(1242); // dh
   });
 
   it("横向源图居中放置（上下留白）", () => {
-    // 2000x1000 横向源图 → scale = min(1.2375, 3.3) = 1.2375
-    // drawW = round(2000 * 1.2375) = 2475
-    // drawH = round(1000 * 1.2375) = 1238
-    // offsetX = (2475 - 2475) / 2 = 0
-    // offsetY = (3300 - 1238) / 2 = 1031
+    // 2000x1000 横向源图 → scale = min(0.621, 1.656) = 0.621
+    // drawW = round(2000 * 0.621) = 1242
+    // drawH = round(1000 * 0.621) = 621
+    // offsetX = (1242 - 1242) / 2 = 0
+    // offsetY = (1656 - 621) / 2 = 517
     const source = document.createElement("canvas");
     source.width = 2000;
     source.height = 1000;
@@ -318,9 +329,9 @@ describe("composeToPortraitCanvas", () => {
     const ctx = target.getContext("2d")!;
     const args = (ctx.drawImage as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(args[5]).toBe(0); // offsetX
-    expect(args[6]).toBe(1031); // offsetY
-    expect(args[7]).toBe(2475); // drawW
-    expect(args[8]).toBe(1238); // drawH
+    expect(args[6]).toBe(517); // offsetY
+    expect(args[7]).toBe(1242); // drawW
+    expect(args[8]).toBe(621); // drawH
   });
 
   it("设置 imageSmoothingQuality = high（平滑缩放）", () => {

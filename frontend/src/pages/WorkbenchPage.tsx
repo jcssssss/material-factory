@@ -49,6 +49,7 @@ export default function WorkbenchPage() {
 
   async function handleStart() {
     if (isRunning) return;
+    logger.appInfo("正在启动任务队列…");
     setIsRunning(true);
     try {
       await runQueue(processor);
@@ -64,6 +65,7 @@ export default function WorkbenchPage() {
   async function handleResume(taskId: string) {
     resumeTaskFromBreakpoint(taskId);
     if (!isRunning) {
+      logger.appInfo("正在从断点恢复队列…");
       setIsRunning(true);
       try {
         await runQueue(processor);

@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { runQueue, runTask } from "../taskRunner";
 import { MockPageProcessor } from "../mockPageProcessor";
 import { useTaskStore } from "../../store/useTaskStore";
-import type { TaskConfig } from "../../types/task";
+import type { ExecutionProgress, TaskConfig } from "../../types/task";
 import { convertWordFilesToPdf } from "../wordConverter";
 import { TaskController } from "../taskController";
 import type { TaskBreakpoint } from "../persistence";
@@ -484,6 +484,122 @@ describe("Word 输入预处理", () => {
     // convertWordFilesToPdf 仅对 b.docx 调用一次
     expect(convertWordFilesToPdf).toHaveBeenCalledTimes(1);
     expect(convertWordFilesToPdf).toHaveBeenCalledWith(["/test/b.docx"], task.taskId);
+  });
+
+  it("Word 转换阶段纳入整体进度，位于 PDF 转换之前", async () => {
+    // 在 mock 转换函数内部捕获调用时刻的进度快照，
+    // 验证转换期间整体进度已切换到 word_convert 阶段。
+    let snapshotDuringConvert: ExecutionProgress | null = null;
+    vi.mocked(convertWordFilesToPdf).mockImplementationOnce(
+      async (files: string[], _taskId: string) => {
+        snapshotDuringConvert = useTaskStore.getState().progress;
+        return files.map((wordPath: string) => {
+          const stem = wordPath.replace(/\\/g, "/").split("/").pop() ?? "";
+          const name = stem.replace(/\.(docx|doc)$/i, "");
+          return { wordPath, pdfPath: `/cache/${name}.pdf`, error: null };
+        });
+      }
+    );
+
+    const task = makeTask({
+      sourcePaths: ["/test/report.docx", "/test/normal.pdf"],
+      firstN: 1,
+    });
+    const processor = new MockPageProcessor();
+    await runTask(task, processor);
+
+    // 转换期间：整体进度处于 word_convert 阶段，且位于 PDF 转换之前
+    expect(snapshotDuringConvert?.currentStage?.stage).toBe("word_convert");
+    expect(snapshotDuringConvert?.plannedStages[0]).toBe("word_convert");
+    expect(snapshotDuringConvert?.plannedStages).toContain("pdf_convert");
+
+    // 任务结束时：word_convert 已标记为完成阶段
+    const finalProgress = useTaskStore.getState().progress;
+    expect(finalProgress?.completedStages).toContain("word_convert");
+  });
+
+  it("多个 Word 文件分批顺序转换（BATCH=6 → 3 批串行）", async () => {
+    const wordFiles = Array.from(
+      { length: 14 },
+      (_, i) => `/test/w${String(i + 1).padStart(2, "0")}.docx`,
+    );
+    // 注入 inFlight 计数：验证共享 profile 下必须串行（同一时刻最多 1 路 soffice）。
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const impl = vi.fn(async (files: string[], _taskId: string) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      inFlight -= 1;
+      return files.map((wordPath: string) => {
+        const stem = wordPath.replace(/\\/g, "/").split("/").pop() ?? "";
+        const name = stem.replace(/\.(docx|doc)$/i, "");
+        return { wordPath, pdfPath: `/cache/${name}.pdf`, error: null };
+      });
+    });
+    vi.mocked(convertWordFilesToPdf).mockImplementation(impl);
+
+    const task = makeTask({ sourcePaths: wordFiles, firstN: 1 });
+    const processor = new MockPageProcessor();
+    const result = await runTask(task, processor);
+
+    // 14 个文件 → 3 批（6+6+2），串行逐批转换。
+    expect(convertWordFilesToPdf).toHaveBeenCalledTimes(3);
+    expect(maxInFlight).toBe(1); // 串行：同一时刻最多 1 路 soffice（共享 profile 下并发会撞锁）
+
+    // 全部成功：每个 Word 转 1 页。
+    expect(result.status).toBe("completed");
+    expect(result.summary.successPageCount).toBe(14);
+    expect(result.summary.failedPageCount).toBe(0);
+    expect(result.summary.totalPdfCount).toBe(14);
+
+    // 恢复默认实现，避免污染后续测试。
+    vi.mocked(convertWordFilesToPdf).mockImplementation(
+      async (files: string[], _taskId: string) => {
+        return files.map((wordPath: string) => {
+          const stem = wordPath.replace(/\\/g, "/").split("/").pop() ?? "";
+          const name = stem.replace(/\.(docx|doc)$/i, "");
+          return { wordPath, pdfPath: `/cache/${name}.pdf`, error: null };
+        });
+      }
+    );
+  });
+});
+
+describe("初始进度与扫描日志", () => {
+  beforeEach(() => resetStore());
+
+  it("任务开始时立即推送 0% 初始进度（含 plannedStages）", async () => {
+    const task = makeTask({ sourcePaths: ["/test/a.pdf"], firstN: 1 });
+    const processor = new MockPageProcessor();
+    let snapshotAtScan: ExecutionProgress | null = null;
+    const origExpand = processor.expandPdfs.bind(processor);
+    // 在 expandPdfs 内捕获初始进度：它应在扫描前已被推送。
+    processor.expandPdfs = async (t) => {
+      snapshotAtScan = useTaskStore.getState().progress;
+      return origExpand(t);
+    };
+
+    await runTask(task, processor);
+
+    expect(snapshotAtScan).not.toBeNull();
+    expect(snapshotAtScan?.taskId).toBe(task.taskId);
+    expect(snapshotAtScan?.plannedStages).toContain("pdf_convert");
+    expect(snapshotAtScan?.currentStage).toBeNull();
+    expect(snapshotAtScan?.completedStages).toEqual([]);
+  });
+
+  it("扫描阶段产生前后日志", async () => {
+    const task = makeTask({
+      sourcePaths: ["/test/report.docx", "/test/a.pdf"],
+      firstN: 1,
+    });
+    const processor = new MockPageProcessor();
+    await runTask(task, processor);
+
+    const messages = useTaskStore.getState().logs.map((l) => l.message);
+    expect(messages.some((m) => m.includes("正在扫描输入文件"))).toBe(true);
+    expect(messages.some((m) => m.includes("扫描完成：找到 2 个 PDF/Word 文件"))).toBe(true);
   });
 });
 

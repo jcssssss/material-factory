@@ -6,6 +6,10 @@ import type {
   LogEntry,
   TaskStatus,
 } from "../types/task";
+
+// 内存日志上限：与磁盘读取上限 MAX_LOGS_TO_LOAD(2000) 对齐，
+// 避免大批量任务（每页 2-3 条日志）跨批线性累积撑大内存。
+const MAX_LOGS_IN_MEMORY = 2000;
 import {
   saveHistory,
   clearPersistedHistory,
@@ -191,10 +195,10 @@ export const useTaskStore = create<TaskStoreState>((set, get) => ({
   },
 
   appendLog: (entry) =>
-    set((s) => ({ logs: [...s.logs, entry] })),
+    set((s) => ({ logs: [...s.logs, entry].slice(-MAX_LOGS_IN_MEMORY) })),
 
   appendLogs: (entries) =>
-    set((s) => ({ logs: [...s.logs, ...entries] })),
+    set((s) => ({ logs: [...s.logs, ...entries].slice(-MAX_LOGS_IN_MEMORY) })),
 
   setLogs: (entries) => set({ logs: entries, logsLoaded: true }),
 

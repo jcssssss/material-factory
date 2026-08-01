@@ -117,6 +117,27 @@ describe("TaskProgressPanel", () => {
     expect(screen.getByText("5/20")).toBeInTheDocument();
   });
 
+  it("word_convert 阶段显示在整体进度管线首位", () => {
+    useTaskStore.getState().enqueueTask({
+      taskId: "task_t1", taskName: "t", sourceType: "files",
+      sourcePaths: [], outputDir: "/out", pageRuleMode: "firstN",
+      status: "running", createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    useTaskStore.getState().setCurrentTaskId("task_t1");
+    useTaskStore.getState().setProgress(makeProgress({
+      plannedStages: ["word_convert", "pdf_convert"],
+      currentStage: { stage: "word_convert", done: 2, total: 6, detail: "Word 转换 2/6" },
+      completedStages: [],
+    }));
+
+    render(<TaskProgressPanel />);
+    // Word 转换标签与 PDF 转换标签都出现在管线中
+    expect(screen.getByText("Word 转换")).toBeInTheDocument();
+    expect(screen.getByText("PDF 转换")).toBeInTheDocument();
+    expect(screen.getByText("2/6")).toBeInTheDocument();
+    expect(screen.getByText("Word 转换 2/6")).toBeInTheDocument();
+  });
+
   it("PDF 转换完成后显示成功/失败统计", () => {
     useTaskStore.getState().enqueueTask({
       taskId: "task_t1", taskName: "t", sourceType: "files",

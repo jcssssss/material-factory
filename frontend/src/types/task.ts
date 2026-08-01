@@ -114,7 +114,12 @@ export type LogEntry = {
 };
 
 // 执行阶段标识。
-export type StageKind = "pdf_convert" | "material_list" | "print_compose";
+// word_convert：Word → PDF 预处理阶段（任务含 Word 输入时出现，排在 pdf_convert 之前）。
+export type StageKind =
+  | "word_convert"
+  | "pdf_convert"
+  | "material_list"
+  | "print_compose";
 
 // 单个阶段的执行进度。
 export type StageProgress = {

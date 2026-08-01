@@ -63,15 +63,26 @@ export async function loadPdfDocument(
     stopAtErrors: false,
     disableFontFace: false,
   });
-  // 超时检测：worker 通信卡住时 30 秒后抛错。
+  // 超时检测：worker 通信卡住时 30 秒后抛错。定时器在 finally 清理，避免每个
+  // 文档残留 30s 闭包挂住 reject；超时分支额外 destroy loadingTask 取消残留加载。
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(
-      () => reject(new Error("PDF 加载超时（30s），疑似 worker 通信卡住")),
-      30000
-    );
+    timeoutId = setTimeout(() => {
+      loadingTask.destroy().catch(() => {});
+      reject(new Error("PDF 加载超时（30s），疑似 worker 通信卡住"));
+    }, 30000);
   });
-  const doc = await Promise.race([loadingTask.promise, timeout]);
-  return doc;
+  try {
+    const doc = await Promise.race([loadingTask.promise, timeout]);
+    return doc;
+  } catch (err) {
+    // 解析失败（损坏/加密）时显式销毁 loadingTask，及时终止 pdf.js worker，
+    // 避免 worker 线程残留到下一次 GC。
+    loadingTask.destroy().catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // 读取 PDF 总页数。用于 prepareWorkItem 中生成 selectedPages。
@@ -121,14 +132,20 @@ export async function renderPageToCanvas(
     background: "#ffffff",
   });
 
-  // 渲染超时检测：60 秒未完成视为卡住。
+  // 渲染超时检测：60 秒未完成视为卡住。定时器在 finally 清理，
+  // 避免每页残留 60s 闭包挂住 renderTask/reject。
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    setTimeout(
+    timeoutId = setTimeout(
       () => reject(new Error(`PDF 渲染超时（60s），page=${pageNumber}`)),
       60000
     );
   });
-  await Promise.race([renderTask.promise, timeout]);
+  try {
+    await Promise.race([renderTask.promise, timeout]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   return { canvas, viewport, page };
 }
@@ -174,6 +191,13 @@ export async function destroyPdfDocument(
   try {
     await doc.destroy();
   } catch {
-    // 销毁失败不阻断后续流程。
+    // pdf.js v3：loadingTask.destroy() 中若 transport.destroy() 抛错，会在
+    // terminate worker 之前 rethrow，导致 worker 线程永久泄漏。重试一次让
+    // destroy 走完 terminate；仍失败则由浏览器/进程兜底回收。
+    try {
+      await doc.destroy();
+    } catch {
+      /* 忽略 */
+    }
   }
 }

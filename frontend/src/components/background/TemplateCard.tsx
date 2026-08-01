@@ -1,5 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import type { BackgroundTemplate } from "../../types/background";
+import { Tip } from "../common/Tip";
+import { Check } from "lucide-react";
 import { readBackgroundThumbnail } from "../../lib/printEngine/backgroundDb";
 
 type Props = {
@@ -75,10 +77,10 @@ export default function TemplateCard({
   return (
     <div
       className={
-        "group relative overflow-hidden rounded-xl border bg-workspace-surface shadow-card transition-all " +
+        "group relative flex flex-col overflow-hidden rounded-xl border bg-card transition-all duration-200 " +
         (disabled
           ? "cursor-not-allowed opacity-50"
-          : "cursor-pointer hover:shadow-lg ") +
+          : "cursor-pointer hover:-translate-y-0.5 hover:shadow-lg ") +
         (selected
           ? "border-workspace-accent ring-2 ring-workspace-accent/30"
           : "border-workspace-border/60")
@@ -92,12 +94,13 @@ export default function TemplateCard({
         }
       }}
     >
-      <div className="aspect-[4/3] overflow-hidden bg-slate-100 p-2">
+      {/* 图片区 */}
+      <div className="relative aspect-[4/3] overflow-hidden bg-gradient-to-br from-slate-100 to-slate-200">
         {thumbUrl && !imgError ? (
           <img
             src={thumbUrl}
             alt={template.file_name}
-            className="h-full w-full object-contain"
+            className="h-full w-full object-contain p-2 transition-transform duration-300 group-hover:scale-[1.03]"
             loading="lazy"
             decoding="async"
             onError={() => setImgError(true)}
@@ -119,32 +122,42 @@ export default function TemplateCard({
             </svg>
           </div>
         )}
+
+        {/* hover 微遮罩：非选择模式下提示可点击进入标定 */}
+        <div className="pointer-events-none absolute inset-0 bg-black/0 transition-colors duration-200 group-hover:bg-black/5" />
+
+        {/* 选中角标：始终可见，配合边框 ring 强化选中态 */}
+        {selected && (
+          <span className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-workspace-accent text-white shadow-md ring-2 ring-white/80">
+            <Check className="h-3.5 w-3.5" strokeWidth={3} />
+          </span>
+        )}
+
+        {/* 状态徽章：图片右下角 */}
+        <span
+          className={
+            "absolute bottom-2 right-2 rounded-full px-2 py-0.5 text-[10px] font-medium text-white shadow-sm " +
+            (template.calibrated ? "bg-emerald-500/90" : "bg-amber-500/90")
+          }
+        >
+          {template.calibrated ? "已标定" : "未标定"}
+        </span>
       </div>
 
-      <div className="space-y-1 p-3">
-        <p className="truncate text-xs font-medium text-workspace-fg">
-          {template.file_name}
-        </p>
-        <div className="flex items-center gap-2 text-[11px] text-workspace-muted">
+      <div className="flex flex-1 flex-col gap-1 p-3">
+        <Tip label={template.file_name} onlyOverflow>
+          <p className="truncate text-xs font-medium text-workspace-fg">
+            {template.file_name}
+          </p>
+        </Tip>
+        <div className="flex items-center justify-between text-[11px] text-workspace-muted">
           <span>
             {template.width}×{template.height}
           </span>
-          <span>·</span>
           <span>{sizeLabel}</span>
         </div>
-        <div className="flex items-center justify-between">
-          <span className="text-[10px] text-workspace-muted">
-            {new Date(template.created_at).toLocaleDateString("zh-CN")}
-          </span>
-          {template.calibrated ? (
-            <span className="rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
-              已标定
-            </span>
-          ) : (
-            <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
-              未标定
-            </span>
-          )}
+        <div className="mt-auto border-t border-workspace-border/50 pt-1.5 text-[10px] text-workspace-muted">
+          {new Date(template.created_at).toLocaleDateString("zh-CN")}
         </div>
       </div>
 
@@ -159,12 +172,12 @@ export default function TemplateCard({
             onChange={() => onToggleSelect(template.id)}
             className="h-4 w-4 rounded border-workspace-border text-workspace-accent focus:ring-workspace-accent"
           />
-          <button
-            type="button"
-            onClick={() => onDelete(template.id)}
-            className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-red-500 shadow-sm transition hover:bg-red-50"
-            title="删除"
-          >
+          <Tip label="删除">
+            <button
+              type="button"
+              onClick={() => onDelete(template.id)}
+              className="flex h-7 w-7 items-center justify-center rounded-full bg-white/90 text-red-500 shadow-sm transition hover:bg-red-50"
+            >
             <svg
               xmlns="http://www.w3.org/2000/svg"
               viewBox="0 0 20 20"
@@ -177,7 +190,8 @@ export default function TemplateCard({
                 clipRule="evenodd"
               />
             </svg>
-          </button>
+            </button>
+          </Tip>
         </div>
       )}
     </div>

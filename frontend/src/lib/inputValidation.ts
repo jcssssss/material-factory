@@ -32,9 +32,7 @@ export function validateTaskInput(task: {
   sourcePaths: string[];
   outputDir?: string;
 }): string | null {
-  if (!task.taskName || task.taskName.trim() === "") {
-    return "请填写任务名";
-  }
+  // 任务名已由资料文件夹名自动推导（见 taskNaming.ts），不再作为表单必填校验。
 
   if (!task.sourcePaths || task.sourcePaths.length === 0) {
     return task.sourceType === "folder"

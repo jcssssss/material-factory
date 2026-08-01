@@ -13,7 +13,7 @@ const CORNER_RADIUS = 8;
 const HIT_RADIUS = 14;
 const CORNER_LABELS = ["①", "②", "③", "④"];
 
-function computeDefaultCorners(): CalibrationCorners {
+export function computeDefaultCorners(): CalibrationCorners {
   const rw = Math.min(0.6, (0.8 / Math.SQRT2));
   const rh = rw * Math.SQRT2;
   const cx = (1 - rw) / 2;
@@ -51,7 +51,7 @@ export default function CornerCalibrator({
   onCornersChange,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const [canvasSize, setCanvasSize] = useState({ w: 800, h: 600 });
   const [corners, setCorners] = useState<CalibrationCorners>(() =>
     initialCorners ?? computeDefaultCorners(),
@@ -67,8 +67,10 @@ export default function CornerCalibrator({
   }, [initialCorners]);
 
   useEffect(() => {
-    const c = containerRef.current;
-    if (!c) return;
+    const stage = stageRef.current;
+    if (!stage) return;
+    // 观察画布容器而非根节点：canvasSize 应基于图片实际绘制区域计算，
+    // 若基于根节点会把底部工具条高度也计入，导致图片底部被裁切。
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
       const maxW = rect.width - 32;
@@ -79,7 +81,7 @@ export default function CornerCalibrator({
         h: Math.round(imgHeight * scale),
       });
     });
-    ro.observe(c);
+    ro.observe(stage);
     return () => ro.disconnect();
   }, [imgWidth, imgHeight]);
 
@@ -167,17 +169,14 @@ export default function CornerCalibrator({
     dragRef.current = null;
   }
 
-  function handleReset() {
-    const def = computeDefaultCorners();
-    setCorners(def);
-    onCornersChange(def);
-  }
-
   const validationError = validateCorners(corners);
 
   return (
-    <div ref={containerRef} className="flex flex-1 flex-col overflow-hidden">
-      <div className="relative flex-1 overflow-hidden rounded-xl border border-workspace-border/60 bg-slate-100">
+    <div className="flex flex-1 flex-col overflow-hidden">
+      <div
+        ref={stageRef}
+        className="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-workspace-border/60 bg-slate-100"
+      >
         <canvas
           ref={canvasRef}
           className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 cursor-grab active:cursor-grabbing"
@@ -189,20 +188,11 @@ export default function CornerCalibrator({
         />
       </div>
 
-      <div className="mt-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={handleReset}
-            className="rounded-lg border border-workspace-border bg-white px-3 py-1.5 text-xs font-medium text-workspace-fg-secondary transition hover:bg-slate-50"
-          >
-            重置
-          </button>
-          {validationError && (
-            <span className="text-xs text-workspace-danger">{validationError}</span>
-          )}
+      {validationError && (
+        <div className="mt-3 flex items-center justify-between">
+          <span className="text-xs text-workspace-danger">{validationError}</span>
         </div>
-      </div>
+      )}
     </div>
   );
 }

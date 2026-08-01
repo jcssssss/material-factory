@@ -44,8 +44,25 @@ fn db_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data.join("data").join("xhs_pic.db"))
 }
 
+// warp 双线性插值并行度：限制为物理核数（消除超线程争抢与过度发热）。
+fn physical_worker_count() -> usize {
+    let n = num_cpus::get_physical();
+    if n >= 1 {
+        n
+    } else {
+        1
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 限制 rayon 全局线程池为物理核数：消除超线程争抢与过度发热。
+    // warp 双线性插值是唯一 rayon 用户，物理核打满几乎无损；
+    // build_global 只能在任何 rayon 使用前调用一次（run 是唯一入口，warp 仅命令运行时触发）。
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(physical_worker_count())
+        .build_global();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
@@ -68,6 +85,7 @@ pub fn run() {
             convert_word_files_to_pdf,
             scan_folder_tree,
             background::save_background_file,
+            background::save_background_file_from_path,
             background::read_background_file,
             background::read_background_thumbnail,
             background::ensure_background_thumbnails,
@@ -112,72 +130,89 @@ fn copy_file(src: String, dst: String) -> Result<(), String> {
 }
 
 // 扫描文件夹（仅顶层）中的 PDF 与 Word 输入文件（.pdf/.docx/.doc），
-// 按文件名升序返回完整路径。
-// 用于 folder 模式输入展开，与 spec.md "Scenario: 文件夹中无 PDF" 对齐。
-#[command]
-fn scan_input_files(folder: String) -> Result<Vec<String>, String> {
-    let folder_path = Path::new(&folder);
-    if !folder_path.exists() {
-        return Err(format!("文件夹不存在：{}", folder));
-    }
-    if !folder_path.is_dir() {
-        return Err(format!("路径不是文件夹：{}", folder));
-    }
-
-    let mut input_files: Vec<PathBuf> = Vec::new();
-    let entries =
-        fs::read_dir(folder_path).map_err(|e| format!("读取文件夹失败：{e}"))?;
+// 递归收集目录树下的 PDF/Word 文件（支持嵌套子目录）。
+// 与 scan_directory_recursive 的目录遍历不同，这里只收集输入文件本身。
+fn collect_input_files_recursive(path: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = fs::read_dir(path).map_err(|e| format!("读取文件夹失败：{e}"))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("读取目录项失败：{e}"))?;
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Some(ext) = path.extension() {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_input_files_recursive(&p, out)?;
+        } else if let Some(ext) = p.extension() {
             if ext.eq_ignore_ascii_case("pdf")
                 || ext.eq_ignore_ascii_case("docx")
                 || ext.eq_ignore_ascii_case("doc")
             {
-                input_files.push(path);
+                out.push(p);
             }
         }
     }
+    Ok(())
+}
 
-    input_files.sort_by(|a, b| {
-        let a_name = a
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let b_name = b
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        a_name.cmp(&b_name)
-    });
+// 按文件名升序返回完整路径。
+// 用于 folder 模式输入展开，与 spec.md "Scenario: 文件夹中无 PDF" 对齐。
+// 递归扫描嵌套子目录，支持 2 层及以上目录中的资料。
+#[command]
+async fn scan_input_files(folder: String) -> Result<Vec<String>, String> {
+    // 递归扫描大目录可能较慢，放阻塞线程池执行。
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder_path = Path::new(&folder);
+        if !folder_path.exists() {
+            return Err(format!("文件夹不存在：{}", folder));
+        }
+        if !folder_path.is_dir() {
+            return Err(format!("路径不是文件夹：{}", folder));
+        }
 
-    Ok(input_files
-        .into_iter()
-        .filter_map(|p| p.to_str().map(|s| s.to_string()))
-        .collect())
+        let mut input_files: Vec<PathBuf> = Vec::new();
+        collect_input_files_recursive(folder_path, &mut input_files)?;
+
+        input_files.sort_by(|a, b| {
+            let a_name = a
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let b_name = b
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            a_name.cmp(&b_name)
+        });
+
+        Ok(input_files
+            .into_iter()
+            .filter_map(|p| p.to_str().map(|s| s.to_string()))
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("扫描输入文件后台执行失败：{e}"))?
 }
 
 // 读取 PDF 文件二进制数据。
 // 字节数组通过 Tauri IPC 传输给前端，由 pdf.js 在 worker 中解析。
 #[command]
-fn read_pdf_bytes(path: String) -> Result<Response, String> {
-    let p = Path::new(&path);
-    if !p.exists() {
-        return Err(format!("文件不存在：{}", path));
-    }
-    if !p.is_file() {
-        return Err(format!("路径不是文件：{}", path));
-    }
-    let bytes = fs::read(p).map_err(|e| format!("读取 PDF 失败：{e}"))?;
-    // 返回 Response 走二进制通道，避免 JSON 序列化 Vec<u8> 为数字数组
-    // （5MB PDF → 20MB JSON 字符串 + 40MB number[] 内存，改为零拷贝二进制传输）
-    Ok(Response::new(bytes))
+async fn read_pdf_bytes(path: String) -> Result<Response, String> {
+    // 大文件 fs::read 较重，放阻塞线程池执行，避免占用主线程/IPC 异步运行时
+    // （同步命令默认在主线程执行，数 MB~数十 MB PDF 会造成卡顿）。
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        if !p.exists() {
+            return Err(format!("文件不存在：{}", path));
+        }
+        if !p.is_file() {
+            return Err(format!("路径不是文件：{}", path));
+        }
+        let bytes = fs::read(p).map_err(|e| format!("读取 PDF 失败：{e}"))?;
+        // 返回 Response 走二进制通道，避免 JSON 序列化 Vec<u8> 为数字数组
+        // （5MB PDF → 20MB JSON 字符串 + 40MB number[] 内存，改为零拷贝二进制传输）
+        Ok(Response::new(bytes))
+    })
+    .await
+    .map_err(|e| format!("读取 PDF 后台执行失败：{e}"))?
 }
 
 // 递归创建输出目录（任务目录 / PDF 子目录）。
@@ -251,7 +286,7 @@ fn write_image_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
 // body 格式：[4 字节 LE u32 path_len][UTF-8 path_bytes][JPEG 像素数据]。
 // Rust 端用 Request 参数拿 InvokeBody::Raw，解开三段直接 fs::write。
 #[command]
-fn write_image_binary(request: Request) -> Result<(), String> {
+async fn write_image_binary(request: Request<'_>) -> Result<(), String> {
     let body: Vec<u8> = match request.body() {
         InvokeBody::Raw(v) => v.clone(),
         InvokeBody::Json(_) => {
@@ -261,7 +296,13 @@ fn write_image_binary(request: Request) -> Result<(), String> {
             );
         }
     };
+    // fs::write 放阻塞线程池执行，避免占用主线程/IPC 异步运行时。
+    tauri::async_runtime::spawn_blocking(move || write_image_binary_sync(&body))
+        .await
+        .map_err(|e| format!("写入图片后台执行失败：{e}"))?
+}
 
+fn write_image_binary_sync(body: &[u8]) -> Result<(), String> {
     if body.len() < 4 {
         return Err("二进制 body 太短，缺少路径长度头".to_string());
     }
@@ -506,6 +547,9 @@ fn convert_word_to_pdf_sync(
     let word_path_clone = word_path.clone();
     thread::spawn(move || {
         let result = Command::new(&soffice_clone)
+            // 同上：跳过 OpenCL 自检与 Java 检测（冷 profile 启动满核浪费）。
+            .env("SAL_DISABLE_OPENCL", "1")
+            .env("SAL_DISABLE_JAVA", "1")
             .arg("--headless")
             .arg("--norestore")
             .arg(format!(
@@ -633,22 +677,26 @@ fn convert_word_files_to_pdf_sync(
         }
     };
 
+    // 共享 profile：全局唯一（word_cache/shared_lo_profile），跨任务/批次复用，
+    // 第二次起 warm start ~1-3s。任务队列串行执行，无并发锁冲突；soffice 正常
+    // 退出残留的 .lock 由陈旧锁检测（pid 已死）处理。转换开始前清理历史残留的
+    // 独立 profile（lo_profile_* / lo_retry_*），避免 word_cache 无限膨胀。
+    let word_cache_dir = app_data.join("word_cache");
+    let shared_profile = word_cache_dir.join("shared_lo_profile");
+    cleanup_stale_profiles(&word_cache_dir, &shared_profile);
+
     for (task_id, group) in groups {
-        let cache_dir = app_data.join("word_cache").join(&task_id);
+        let cache_dir = word_cache_dir.join(&task_id);
         if let Err(e) = fs::create_dir_all(&cache_dir) {
             for (idx, _) in &group {
                 results[*idx].error = Some(format!("创建缓存目录失败：{e}"));
             }
             continue;
         }
-        // 每批使用独立 profile：soffice 进程崩溃或异常退出会污染共享 profile
-        //（锁残留/组件注册损坏），导致同任务后续批次或重试启动即失败。独立
-        // profile 让每次转换互相隔离，崩溃只影响自身。
-        let uniq = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let lo_profile = cache_dir.join(format!("lo_profile_{task_id}_{uniq}"));
+        // 每批复用共享 profile：soffice 崩溃/超时会在下方失败分支删除共享 profile
+        //（锁残留/组件注册损坏），下批自动冷启动重建；未生成文件走独立 lo_retry_*
+        // profile 逐个重试，崩溃隔离能力保留。
+        let lo_profile = shared_profile.clone();
 
         // 记录转换前已有 PDF，用于转换后识别新增输出（soffice 输出名可能
         // 因特殊字符/长文件名与预期 stem 不一致）
@@ -667,7 +715,11 @@ fn convert_word_files_to_pdf_sync(
         let timeout = Duration::from_secs(60 + 20 * group.len() as u64);
         let word_paths: Vec<String> = group.iter().map(|(_, f)| f.word_path.clone()).collect();
         let mut cmd = Command::new(&soffice);
-        cmd.arg("--headless")
+        // 跳过 LibreOffice 无用的 OpenCL/GPU 自检与 Java VM 检测：冷 profile 首次
+        // 启动的 OpenCL 基准自检实测 ~3.4s 满核，而渲染已确认用 CPU raster（UseOpenCL=false）。
+        cmd.env("SAL_DISABLE_OPENCL", "1")
+            .env("SAL_DISABLE_JAVA", "1")
+            .arg("--headless")
             .arg("--norestore")
             .arg(format!(
                 "-env:UserInstallation=file://{}",
@@ -686,6 +738,8 @@ fn convert_word_files_to_pdf_sync(
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
+                // 启动失败可能源于共享 profile 损坏/残留锁，删除后下批重建。
+                let _ = fs::remove_dir_all(&shared_profile);
                 for (idx, _) in &group {
                     results[*idx].error = Some(format!("启动 soffice 失败：{e}"));
                 }
@@ -808,6 +862,8 @@ fn convert_word_files_to_pdf_sync(
                     results[*idx].error = Some("LibreOffice 转换超时".to_string());
                 }
             }
+            // 超时后共享 profile 可能残留锁/损坏组件，删除重建避免下批启动失败。
+            let _ = fs::remove_dir_all(&shared_profile);
         } else {
             // 进程崩溃/非零退出（如某文件触发 UNO 异常拖垮整批 soffice）：
             // 已生成的 PDF 已在上方认领，对未生成的逐个独立重试，隔离真正坏的
@@ -842,10 +898,32 @@ fn convert_word_files_to_pdf_sync(
                     results[*idx].error = Some(detail);
                 }
             }
+            // 崩溃后共享 profile 可能残留锁/损坏组件，删除重建避免下批启动失败。
+            let _ = fs::remove_dir_all(&shared_profile);
         }
     }
 
     results
+}
+
+// 删除 word_cache 下所有历史残留的独立 profile 目录（lo_profile* / lo_retry*，
+// 含单文件路径遗留的无后缀 lo_profile），保留共享 profile（shared）与转换产物
+// PDF（文件）。任务队列串行执行，清理时无在途 soffice，安全。
+fn cleanup_stale_profiles(word_cache: &Path, shared: &Path) {
+    let Ok(entries) = fs::read_dir(word_cache) else { return };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_dir() || p == shared {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with("lo_profile") || name.starts_with("lo_retry") {
+            let _ = fs::remove_dir_all(&p);
+        } else {
+            // 任务子目录（word_cache/{task_id}）：再清一层
+            cleanup_stale_profiles(&p, shared);
+        }
+    }
 }
 
 // LibreOffice 的 -env:UserInstallation 需要 URL 编码的路径（file:// 后不能含裸空格等
@@ -885,7 +963,10 @@ fn run_soffice_single(
         .unwrap_or(0);
     let retry_profile = cache_dir.join(format!("lo_retry_{uniq}"));
     let mut cmd = Command::new(soffice);
-    cmd.arg("--headless")
+    // 同上：跳过 OpenCL 自检与 Java 检测，避免冷 profile 满核启动浪费。
+    cmd.env("SAL_DISABLE_OPENCL", "1")
+        .env("SAL_DISABLE_JAVA", "1")
+        .arg("--headless")
         .arg("--norestore")
         .arg(format!(
             "-env:UserInstallation=file://{}",
@@ -946,6 +1027,30 @@ fn log_file_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app_data.join("logs").join("app.log"))
 }
 
+// 日志文件大小上限。超过后保留最近一半（按行边界裁剪），
+// 防止长时间运行 app.log 无限膨胀：占用磁盘、启动 read_log_file 读整文件变慢。
+// 检查仅一次 stat（O(1)），超限才做一次读+写（低频），不影响正常运行性能。
+const MAX_LOG_FILE_BYTES: u64 = 4 * 1024 * 1024;
+
+// 若日志文件超过上限，保留最近一半内容（从完整行边界开始裁剪）。
+fn trim_log_file(log_path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::metadata(log_path)?;
+    if meta.len() <= MAX_LOG_FILE_BYTES {
+        return Ok(());
+    }
+    let all = std::fs::read(log_path)?;
+    let keep_from = all.len().saturating_sub((MAX_LOG_FILE_BYTES / 2) as usize);
+    // 从保留起点后的第一个换行开始，避免从某行中间切开（JSONL 一行一条）。
+    let start = all[keep_from..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(keep_from, |off| keep_from + off + 1);
+    if start >= all.len() {
+        return Ok(());
+    }
+    std::fs::write(log_path, &all[start..])
+}
+
 // 追加一行日志到日志文件。前端传入完整 JSON 字符串（不含换行）。
 // 文件不存在时自动创建；目录不存在时先创建。
 #[command]
@@ -960,6 +1065,8 @@ fn append_log_line(
                 .map_err(|e| format!("创建日志目录失败：{e}"))?;
         }
     }
+    // 写入前先裁剪超限的历史日志，保证最新日志始终保留。
+    trim_log_file(&log_path).map_err(|e| format!("整理日志文件失败：{e}"))?;
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1136,13 +1243,126 @@ fn scan_directory_recursive(path: &Path) -> Result<FolderTreeNode, String> {
 // 与 spec.md "Scenario: 扫描正常的多级目录" / "Scenario: 自动忽略系统文件" /
 // "Scenario: 扫描空文件夹" 对齐。
 #[command]
-fn scan_folder_tree(folder: String) -> Result<FolderTreeNode, String> {
-    let folder_path = Path::new(&folder);
-    if !folder_path.exists() {
-        return Err(format!("文件夹不存在：{}", folder));
+async fn scan_folder_tree(folder: String) -> Result<FolderTreeNode, String> {
+    // 递归扫描大目录可能数百 ms，放阻塞线程池执行，避免占用主线程/IPC 异步运行时。
+    tauri::async_runtime::spawn_blocking(move || {
+        let folder_path = Path::new(&folder);
+        if !folder_path.exists() {
+            return Err(format!("文件夹不存在：{}", folder));
+        }
+        if !folder_path.is_dir() {
+            return Err(format!("路径不是文件夹：{}", folder));
+        }
+        scan_directory_recursive(folder_path)
+    })
+    .await
+    .map_err(|e| format!("扫描文件夹后台执行失败：{e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "xhs_pic_scan_{tag}_{}_{}",
+            std::process::id(),
+            id
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
-    if !folder_path.is_dir() {
-        return Err(format!("路径不是文件夹：{}", folder));
+
+    #[test]
+    fn collect_recursive_finds_nested_input_files() {
+        let root = temp_dir("nested");
+        // 顶层 PDF
+        fs::write(root.join("top.pdf"), b"x").unwrap();
+        // 2 层子目录
+        let l1 = root.join("level1");
+        fs::create_dir_all(&l1).unwrap();
+        fs::write(l1.join("a.docx"), b"x").unwrap();
+        // 3 层子目录
+        let l2 = l1.join("level2");
+        fs::create_dir_all(&l2).unwrap();
+        fs::write(l2.join("b.doc"), b"x").unwrap();
+        // 非输入扩展名，应被忽略
+        fs::write(l2.join("note.txt"), b"x").unwrap();
+        // 空目录不应报错
+        fs::create_dir_all(root.join("empty")).unwrap();
+
+        let mut files = Vec::new();
+        collect_input_files_recursive(&root, &mut files).unwrap();
+
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.docx", "b.doc", "top.pdf"]);
     }
-    scan_directory_recursive(folder_path)
+
+    #[test]
+    fn cleanup_stale_profiles_keeps_shared_and_pdfs() {
+        let root = temp_dir("cleanup");
+        // 共享 profile 目录，应保留
+        let shared = root.join("shared_lo_profile");
+        fs::create_dir_all(&shared).unwrap();
+        // 任务子目录：历史独立 profile + 转换产物 PDF
+        let t1 = root.join("task_a");
+        fs::create_dir_all(t1.join("lo_profile_task_a_111")).unwrap();
+        fs::create_dir_all(t1.join("lo_retry_222")).unwrap();
+        fs::write(t1.join("report.pdf"), b"x").unwrap();
+        // 另一任务的历史 profile
+        let t2 = root.join("task_b");
+        fs::create_dir_all(t2.join("lo_profile_task_b_333")).unwrap();
+
+        cleanup_stale_profiles(&root, &shared);
+
+        assert!(shared.exists(), "共享 profile 应保留");
+        assert!(t1.join("report.pdf").exists(), "转换产物 PDF 应保留");
+        assert!(!t1.join("lo_profile_task_a_111").exists(), "历史批量 profile 应删除");
+        assert!(!t1.join("lo_retry_222").exists(), "历史重试 profile 应删除");
+        assert!(!t2.join("lo_profile_task_b_333").exists(), "其他任务历史 profile 应删除");
+    }
+
+    #[test]
+    fn physical_worker_count_is_at_least_one() {
+        // warp 双线性插值并行度：物理核数 >= 1，保证 rayon 池合法。
+        assert!(physical_worker_count() >= 1);
+    }
+
+    #[test]
+    fn trim_log_file_caps_size_and_keeps_line_boundary() {
+        let root = temp_dir("log_trim");
+        let path = root.join("app.log");
+
+        // 构造超过上限的文件：每行 100 字节 + 换行，行数使总大小 > 4MB。
+        let line = [b'x'; 100];
+        let mut content = Vec::new();
+        let lines = (MAX_LOG_FILE_BYTES as usize / 100) + 20;
+        for _ in 0..lines {
+            content.extend_from_slice(&line);
+            content.push(b'\n');
+        }
+        fs::write(&path, &content).unwrap();
+        assert!(fs::metadata(&path).unwrap().len() > MAX_LOG_FILE_BYTES);
+
+        trim_log_file(&path).unwrap();
+
+        let trimmed = fs::read(&path).unwrap();
+        assert!(
+            trimmed.len() as u64 <= MAX_LOG_FILE_BYTES,
+            "裁剪后仍超限：{}",
+            trimmed.len()
+        );
+        // 从完整行边界开始：首字节是行内容，末字节是换行。
+        assert_eq!(trimmed[0], b'x');
+        assert_eq!(*trimmed.last().unwrap(), b'\n');
+    }
 }
