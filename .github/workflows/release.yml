@@ -42,6 +42,7 @@ jobs:
             "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.0.0/libjpeg-turbo-3.0.0.tar.gz"
           tar xzf /tmp/lj.tar.gz -C /tmp
           cmake -S /tmp/libjpeg-turbo-3.0.0 -B /tmp/jpeg-build \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_OSX_ARCHITECTURES=x86_64 \
             -DCMAKE_INSTALL_PREFIX=/tmp/jpeg-out \
             -DENABLE_SHARED=OFF -DENABLE_STATIC=ON \
