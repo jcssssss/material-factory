@@ -364,7 +364,8 @@ fn soffice_usable(path: &Path) -> bool {
 }
 
 fn find_libreoffice(app: &tauri::AppHandle) -> Option<PathBuf> {
-    // 1) 优先应用捆绑的资源目录（随安装包分发的 LibreOffice）
+    // 1) 优先应用捆绑的资源目录（随安装包分发的 LibreOffice，仅 macos/windows 有捆绑资源）
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Ok(res) = app.path().resource_dir() {
         // Tauri 打包 resources 可能带 _up_ 前缀、保留 vendor 顶层，逐一尝试
         let mut bundled_paths: Vec<PathBuf> = Vec::new();

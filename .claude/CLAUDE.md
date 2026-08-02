@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-小红书素材工厂 — 完全本地执行的桌面 PDF 批量转图片工具（Tauri v2 + React + Rust）。支持 Word 输入转换、资料列表图生成、仿打印图片合成。
+小红书素材工厂 — 完全本地执行的桌面 PDF 批量转图片工具（Tauri v2 + React + Rust）。支持 Word 输入转换、资料列表图生成、仿打印图片合成。去水印/文档清理后端（Rust + Python 双引擎）已实现并注册，前端页面待完成。
 
 ## 开发命令
 
@@ -31,6 +31,11 @@ cargo build              # Rust 编译
 cargo test               # Rust 单元测试
 cargo check              # 类型检查（快速）
 cargo test -- --nocapture # 测试带 stdout 输出
+
+# Python 去水印引擎 (cd tools/document_cleaning_engine)
+pip install -r requirements.txt  # PyMuPDF / lxml / python-docx
+python -m pytest                 # 引擎测试；-m integration 仅跑端到端
+python cli.py detect <pdf>       # 手动调用 CLI，stdout 输出 JSON
 ```
 
 ## 项目结构约定
@@ -51,12 +56,14 @@ cargo test -- --nocapture # 测试带 stdout 输出
 ```
 frontend/src/
 ├── lib/                  # 核心业务逻辑
-│   ├── taskRunner.ts     # 串行队列执行器（三级失败隔离）
+│   ├── taskRunner.ts     # 串行队列执行器（三级失败隔离）+ setProgress 节流
 │   ├── taskController.ts # 运行时暂停/继续/取消的状态机
-│   ├── pdfPageProcessor.ts # PDF 页处理器（pdf.js 渲染）
-│   ├── exportImage.ts    # 3:4 JPG 合成 + 300 DPI 元数据
+│   ├── pdfPageProcessor.ts # PDF 页处理器（pdf.js 渲染 + 流水线预取 + 编码 Worker）
+│   ├── encodeWorker.ts   # 共享编码 Worker（OffscreenCanvas 合成 + JPEG 编码，移出主线程）
+│   ├── progressThrottle.ts # setProgress 节流（高频进度合并到 ~10Hz）
+│   ├── exportImage.ts    # 3:4 JPG 合成 + 150 DPI 元数据 + 二进制写盘
 │   ├── pageRule.ts       # 页码规则解析器
-│   ├── printEngine/      # 仿打印图片合成（warp + multiply）
+│   ├── printEngine/      # 仿打印图片合成（warp + multiply + 二进制 body）
 │   ├── materialList/     # 资料列表图生成
 │   └── persistence.ts    # localStorage 持久化（历史 + 断点）
 ├── store/useTaskStore.ts # 单一 Zustand store
@@ -66,10 +73,13 @@ frontend/src/
 └── routes/index.tsx      # 路由定义（HashRouter）
 
 src-tauri/src/
+├── main.rs               # 程序入口（tauri::Builder + 事件循环）
 ├── lib.rs                # Tauri 命令注册（文件读写/日志/Word 转换）
 ├── db.rs                 # SQLite（rusqlite, WAL, 背景模板 CRUD）
 ├── warp.rs               # DLT 透视变形（手写高斯消元 + 双线性插值）
-└── background.rs         # 背景文件管理（文件存储 + 数据库）
+├── background.rs         # 背景文件管理（文件存储 + 数据库）
+├── watermark.rs          # 去水印/页眉/页脚（lopdf 纯逻辑 + 薄命令层）
+└── python_bridge.rs      # subprocess 调用 tools/ 下 Python CLI，JSON 回传
 ```
 
 ## 核心工作流
@@ -92,8 +102,8 @@ src-tauri/src/
 每个 PDF 完成后写入 localStorage 断点，应用重启后可从断点继续未完成任务。
 
 ### 输出规格
-- 图片尺寸: 2475×3300 (8.25"×11" @ 300 DPI, 3:4 竖版)
-- JPG 质量 100%，JFIF APP0 段嵌入 300 DPI 元数据
+- 图片尺寸: 1242×1656 (8.25"×11" @ 150 DPI, 3:4 竖版)
+- JPG 质量 100%，JFIF APP0 段嵌入 150 DPI 元数据
 - 页面比例不匹配时：等比缩放居中放置，白色补边
 
 ## 前端关键约定
@@ -113,7 +123,15 @@ src-tauri/src/
 - **SQLite** (rusqlite bundled, WAL 模式) — 仅存储背景模板数据。tasks/page_results/logs 改用 JSONL 文件 + localStorage。
 - **LibreOffice** 转换 Word → PDF（无头模式 `soffice --headless --convert-to pdf`），120 秒超时。
 - **warp.rs** 完整手写 DLT 算法计算单应性矩阵（无 opencv 依赖），反向映射 + 双线性插值。
+- **lopdf 0.34** 用于 watermark.rs 解析/改写 PDF 内容流（文本/Image/Form XObject、/Annots）。
 - 权限错误检查: macOS TCC (`Operation not permitted`)、Windows (`Access is denied`)。
+
+## 去水印 / 文档清理（进行中）
+
+- **双引擎并存**：`watermark.rs`（Rust + lopdf，覆盖 /Annots、Form XObject、文本/图片水印、页眉/页脚 y 阈值）与 `tools/document_cleaning_engine/`（Python + PyMuPDF，`detect`/`clean`/`validate` 三个子命令）。两套命令都已注册在 `invoke_handler`。
+- **Rust 桥接**：`python_bridge.rs` 用 `python3` subprocess 调用 `cli.py`；路径按 `DOC_CLEANER_CLI` 环境变量 → 相对路径 → 可执行文件同级 依次解析。CLI 约定：stdout 承载 JSON 数据，stderr 承载日志。
+- **Python 引擎**：依赖见 `requirements.txt`（PyMuPDF、lxml、python-docx）；测试用 pytest，端到端用例打 `-m integration` 标记。
+- **前端状态**：路由 `/watermark-removal` 已注册但 `disabled: true`，`DocumentCleanerPage` 尚未实现。接手时先补前端页面，再决定双引擎去留。
 
 ## 测试规范
 
@@ -127,6 +145,14 @@ src-tauri/src/
 2. 在 `lib.rs::run()` 的 `invoke_handler` 中注册。
 3. 在前端通过 `import { invoke } from "@tauri-apps/api/core"` 调用。
 
+## CI/CD 与发布
+
+- **CI（`.github/workflows/ci.yml`）**：push/PR 到 main 触发。frontend job（ubuntu）跑 `npx tsc --noEmit` + `npx vitest run`；backend job 装齐 Tauri Linux 系统依赖后跑 `cargo test`（失败时以 `::error` 注释输出诊断）。`-D warnings` 开启，任何告警都会导致编译失败。
+- **发布（`.github/workflows/release.yml`）**：推送 `v*` tag 触发。macos-14 打 Intel x86_64 dmg，windows-2022 打 msi + NSIS exe；`softprops/action-gh-release` 自动建 Release 并上传，`generate_release_notes: true`。
+- **捆绑 LibreOffice**：构建前 `bash scripts/prepare-libreoffice.sh` 下载对应平台 LibreOffice 到 `vendor/libreoffice/`（gitignore，不入库）。`find_libreoffice`（lib.rs）优先查捆绑目录，再回退系统路径 + PATH。注意：捆绑路径查找仅 macos/windows 有 cfg 分支，改此函数别破坏 Linux 编译。
+- **版本号三处同步**：`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`、`frontend/package.json` 的 `version` 保持一致，且与 tag 号一致（历史上 package.json 曾落后）。
+- **发版流程**：本地验证 → 三处升版本号 → 提交推 main 等 CI 绿 → `git tag vX.Y.Z && git push origin vX.Y.Z`。
+
 ## 依赖信息
 
 ### 前端
@@ -138,4 +164,7 @@ src-tauri/src/
 - tauri 2, tauri-plugin-dialog 2
 - rusqlite 0.31 (bundled SQLite)
 - image 0.24 (jpeg + png features)
+- lopdf 0.34（watermark.rs 解析/改写 PDF 内容流）
 - serde 1 + serde_json 1
+- rayon 1 + num_cpus 1（并行处理）
+- Python 引擎依赖见 tools/document_cleaning_engine/requirements.txt
