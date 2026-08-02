@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { viteStaticCopy } from "vite-plugin-static-copy";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,7 +11,23 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // pdf.js 渲染未嵌入的中文 CID 字体需要 CMap/标准字体资源：
+    // 构建时把 pdfjs-dist 自带资源复制进产物，运行时用相对路径加载（file:// 兼容）。
+    viteStaticCopy({
+      targets: [
+        {
+          src: "node_modules/pdfjs-dist/cmaps/*",
+          dest: "pdfjs/cmaps",
+        },
+        {
+          src: "node_modules/pdfjs-dist/standard_fonts/*",
+          dest: "pdfjs/standard_fonts",
+        },
+      ],
+    }),
+  ],
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

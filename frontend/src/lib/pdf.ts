@@ -62,6 +62,14 @@ export async function loadPdfDocument(
     data: bytes,
     stopAtErrors: false,
     disableFontFace: false,
+    // 未嵌入的中文 CID 字体（如标题用的 SimSun）必须靠 CMap 解码字符；
+    // 资源由 vite.config 的 viteStaticCopy 复制到产物 pdfjs/cmaps 与 pdfjs/standard_fonts。
+    // useWorkerFetch=false：让 CMap 走主线程按页面 URL 解析相对路径；
+    // 默认 true 会在 worker 内 fetch，相对路径基于 worker 脚本 URL（/assets/...）而 404。
+    cMapUrl: "./pdfjs/cmaps/",
+    cMapPacked: true,
+    useWorkerFetch: false,
+    standardFontDataUrl: "./pdfjs/standard_fonts/",
   });
   // 超时检测：worker 通信卡住时 30 秒后抛错。定时器在 finally 清理，避免每个
   // 文档残留 30s 闭包挂住 reject；超时分支额外 destroy loadingTask 取消残留加载。

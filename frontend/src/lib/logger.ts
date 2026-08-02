@@ -2,7 +2,6 @@
 // Task 6 起：
 //   - 内存：写入 store.logs，供日志页与进度面板实时展示
 //   - 落盘：异步调用 Rust append_log_line 写入 {app_data_dir}/logs/app.log
-//   - 控制台：同步输出便于开发调试
 //
 // 日志规范：
 //   - 应用级 (scope=app)：应用启动、队列开始/结束、异常
@@ -57,27 +56,13 @@ function append(
     ...ctx,
   };
 
-  // 1. 写入缓冲队列，microtask 内合并刷新到 store（避免每条日志都触发重渲染）。
+  // 写入缓冲队列，microtask 内合并刷新到 store（避免每条日志都触发重渲染）。
   pendingEntries.push(entry);
   if (!flushScheduled) {
     flushScheduled = true;
     // queueMicrotask 在当前同步代码全部执行完毕后、下一个事件循环之前执行，
     // 合并同一事件循环内的所有日志为一次 store 更新。
     queueMicrotask(flushPendingEntries);
-  }
-
-  // 2. 控制台输出便于开发调试（同步，不影响性能）。
-  const prefix = `[${level}]`;
-  const taskTag = ctx?.taskId ? ` task=${ctx.taskId}` : "";
-  const pdfTag = ctx?.pdfPath ? ` pdf=${ctx.pdfPath}` : "";
-  const pageTag = ctx?.pageNumber ? ` page=${ctx.pageNumber}` : "";
-  const consoleMsg = `${prefix}${taskTag}${pdfTag}${pageTag} ${message}`;
-  if (level === "error") {
-    console.error(consoleMsg);
-  } else if (level === "warn") {
-    console.warn(consoleMsg);
-  } else {
-    console.info(consoleMsg);
   }
 }
 

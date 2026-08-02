@@ -5,7 +5,7 @@ import { Tip } from "../common/Tip";
 import type { LogEntry, StageKind } from "../../types/task";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { Circle, CircleCheck, ArrowRight, Play, Pause, XCircle } from "lucide-react";
+import { Circle, CircleCheck, Loader2, ArrowRight, Play, Pause, XCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const STAGE_LABELS: Record<StageKind, string> = {
@@ -107,7 +107,7 @@ export function TaskProgressPanel() {
                 {isStageCompleted ? (
                   <CircleCheck className="h-3.5 w-3.5 text-emerald-500" />
                 ) : isCurrent ? (
-                  <span className="h-2 w-2 rounded-full bg-primary" />
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
                 ) : (
                   <span className="h-2 w-2 rounded-full border border-current" />
                 )}

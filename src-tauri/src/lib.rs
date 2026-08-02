@@ -364,6 +364,9 @@ fn soffice_usable(path: &Path) -> bool {
 }
 
 fn find_libreoffice(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // Linux 无捆绑资源目录，AppHandle 仅供 macos/windows 的资源目录查找使用。
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let _ = app;
     // 1) 优先应用捆绑的资源目录（随安装包分发的 LibreOffice，仅 macos/windows 有捆绑资源）
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Ok(res) = app.path().resource_dir() {
