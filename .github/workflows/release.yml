@@ -92,10 +92,6 @@ jobs:
 
   windows:
     runs-on: windows-2022
-    env:
-      # vcpkg 二进制缓存目录（actions/cache 持久化），避免每次从源码编译 libheif。
-      # 必须 job 级 env：GITHUB_ENV 写入对同一步不生效，vcpkg install 读不到。
-      VCPKG_BINARY_SOURCES: files,C:/vcpkg-bincache,readwrite
     defaults:
       run:
         working-directory: frontend
@@ -121,10 +117,14 @@ jobs:
       - run: bash ../scripts/prepare-libreoffice.sh
       # libheif-sys 在 msvc 下走 vcpkg 找系统 libheif，需先安装（embedded-libheif 仅对非 msvc 生效）。
       # 注意 triplet 必须与 vcpkg crate 的默认值一致（x64-windows-static-md），否则 find_package 找不到。
+      # vcpkg 二进制缓存（files 后端）按 ABI hash 匹配，GitHub runner 预装 vcpkg 会在任务间
+      # 更新（vcpkg-cmake-config 版本漂移 2024→2026），ABI 变化导致二进制缓存跨 run 全 miss
+      # （日志 "Restored 0 package(s)"）。改缓存 C:\vcpkg\installed 安装结果目录：
+      # 恢复后 vcpkg install 识别已安装直接跳过编译，不依赖 ABI 匹配。
       - uses: actions/cache@v4
         with:
-          path: C:/vcpkg-bincache
-          key: vcpkg-bin-x64-windows-static-md
+          path: C:\vcpkg\installed\x64-windows-static-md
+          key: vcpkg-installed-x64-windows-static-md
       - name: Install libheif via vcpkg
         run: |
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
