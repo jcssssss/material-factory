@@ -45,11 +45,25 @@ case "$(uname -s)" in
     echo "下载 ${URL}"
     curl -fL --retry 3 -o /tmp/xhs_lo.msi "$URL"
     INSTALL_DIR="/tmp/xhs_lo_install"
-    msiexec //i "$(cygpath -w /tmp/xhs_lo.msi)" //qn TARGETDIR="$(cygpath -w "$INSTALL_DIR")" //norestart
-    cp -R "$INSTALL_DIR/program" "$VENDOR/program"
-    msiexec //x "$(cygpath -w /tmp/xhs_lo.msi)" //qn
+    MSI_WIN="$(cygpath -w /tmp/xhs_lo.msi)"
+    INSTALL_DIR_WIN="$(cygpath -w "$INSTALL_DIR")"
+    # administrative install：把 MSI 解包到指定目录，不写注册表/系统。
+    # 之前用 `msiexec //i ... TARGETDIR=...` 静默安装对 LibreOffice MSI 不可靠
+    # （TARGETDIR 常被忽略导致 program 目录不生成），故改用 /a 解包。
+    msiexec //a "$MSI_WIN" //qn TARGETDIR="$INSTALL_DIR_WIN"
+    SOFFICE_EXE="$(find "$INSTALL_DIR" -iname 'soffice.exe' | head -1)"
+    if [ -z "$SOFFICE_EXE" ]; then
+      echo "未能从 MSI 解包出 soffice.exe，解包内容（前 30 个目录）：" >&2
+      find "$INSTALL_DIR" -maxdepth 3 -type d | head -30 >&2
+      exit 1
+    fi
+    # 复制整个 LibreOffice 根目录（program + share 等），Rust 端只认 program/soffice.exe，
+    # 但 share/ 等资源缺失会导致 soffice 转换时无法启动。
+    LO_ROOT="$(dirname "$(dirname "$SOFFICE_EXE")")"
+    mkdir -p "$VENDOR"
+    cp -R "$LO_ROOT/." "$VENDOR/"
     rm -f /tmp/xhs_lo.msi
-    echo "已解压到 vendor/libreoffice/program"
+    echo "已解包 LibreOffice 到 vendor/libreoffice（soffice: $SOFFICE_EXE）"
     ;;
   *)
     echo "不支持平台: $(uname -s)" >&2

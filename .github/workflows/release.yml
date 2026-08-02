@@ -13,6 +13,8 @@ jobs:
     env:
       # 仅构建 Intel Mac 包，需捆绑 x86-64 版 LibreOffice（runner 是 arm64）
       LIBREOFFICE_ARCH: x86-64
+      # 交叉编译（arm64→x86_64）时 libheif 的 pkg-config 交叉检查需显式放行
+      PKG_CONFIG_ALLOW_CROSS: "1"
     defaults:
       run:
         working-directory: frontend
@@ -54,6 +56,11 @@ jobs:
           toolchain: stable
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
+      # libheif-sys 在 msvc 下走 vcpkg 找系统 libheif，需先安装（embedded-libheif 仅对非 msvc 生效）
+      - name: Install libheif via vcpkg
+        run: |
+          echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
+          vcpkg install libheif:x64-windows
       - run: npm run tauri build
       - uses: softprops/action-gh-release@v2
         with:
