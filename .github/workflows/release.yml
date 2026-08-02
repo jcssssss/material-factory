@@ -9,7 +9,10 @@ permissions:
 
 jobs:
   macos:
-    runs-on: macos-13
+    runs-on: macos-14
+    env:
+      # 仅构建 Intel Mac 包，需捆绑 x86-64 版 LibreOffice（runner 是 arm64）
+      LIBREOFFICE_ARCH: x86-64
     defaults:
       run:
         working-directory: frontend
@@ -23,12 +26,15 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+      - name: Add Intel macOS target
+        run: rustup target add x86_64-apple-darwin
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
-      - run: npm run tauri build
+      - name: Build Intel (x86_64) bundle
+        run: npm run tauri build -- --target x86_64-apple-darwin
       - uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/bundle/dmg/*.dmg
+          files: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
           generate_release_notes: true
 
   windows:

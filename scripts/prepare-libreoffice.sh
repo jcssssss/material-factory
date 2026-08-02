@@ -4,6 +4,7 @@
 # 可用环境变量覆盖：
 #   LIBREOFFICE_VERSION  （如 24.8.4）
 #   LIBREOFFICE_URL      （完整下载根 URL，可指向镜像）
+#   LIBREOFFICE_ARCH     （强制下载架构：aarch64 / x86-64，交叉构建时使用）
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,15 +22,15 @@ mkdir -p "$VENDOR"
 
 case "$(uname -s)" in
   Darwin)
-    ARCH="$(uname -m)"
-    # uname 输出 x86_64/arm64，官方 dmg 文件名用 x86-64/aarch64
-    case "$ARCH" in
-      arm64)  FILE_ARCH="aarch64" ;;
-      x86_64) FILE_ARCH="x86-64" ;;
-      *)      FILE_ARCH="$ARCH" ;;
+    # 默认取构建机架构；交叉构建（如 arm64 runner 打 Intel 包）时用 LIBREOFFICE_ARCH 覆盖
+    case "${LIBREOFFICE_ARCH:-$(uname -m)}" in
+      arm64)   DOWNLOAD_ARCH="arm64";  FILE_ARCH="aarch64" ;;
+      x86-64)  DOWNLOAD_ARCH="x86_64"; FILE_ARCH="x86-64" ;;
+      x86_64)  DOWNLOAD_ARCH="x86_64"; FILE_ARCH="x86-64" ;;
+      *)       DOWNLOAD_ARCH="${LIBREOFFICE_ARCH:-$(uname -m)}"; FILE_ARCH="$DOWNLOAD_ARCH" ;;
     esac
     DMG="LibreOffice_${VERSION}_MacOS_${FILE_ARCH}.dmg"
-    URL="${BASE_URL}/mac/${ARCH}/${DMG}"
+    URL="${BASE_URL}/mac/${DOWNLOAD_ARCH}/${DMG}"
     echo "下载 ${URL}"
     curl -fL --retry 3 -o /tmp/xhs_lo.dmg "$URL"
     MOUNT="$(hdiutil attach /tmp/xhs_lo.dmg -nobrowse | awk -F'\t' 'END{print $3}')"

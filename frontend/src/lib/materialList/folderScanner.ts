@@ -6,7 +6,7 @@
 //   - Rust 侧对无法读取元数据的文件跳过，不中断扫描
 //   - 返回类型化的 FolderTreeNode 树供后续布局与渲染使用
 //
-// 与 backend/src/lib.rs `scan_folder_tree` 命令一一对应。
+// 与 src-tauri/src/lib.rs `scan_folder_tree` 命令一一对应。
 
 import { invoke } from "@tauri-apps/api/core";
 import type { FolderTreeNode } from "../../types/materialList";
