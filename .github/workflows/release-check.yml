@@ -1,19 +1,31 @@
-name: Release
+name: Release Check
 
+# 手动触发的发布预检：在真实发布 runner（arm64 macos-14 / windows-2022）上跑
+# 完整的 tauri build，提前暴露交叉编译/依赖环境问题，不创建 Release、不打 tag。
+#
+# 为什么存在：发布环境错误（如 macOS arm64→x86_64 交叉编译的 libjpeg 架构、
+# libheif 的 pkg-config 检测）本地 x86_64 Mac 无法复现，只能等真实 runner。
+# 以前要"打 tag → 等全量构建 → 失败 → 改 → 再打 tag"，每轮 30 分钟+。
+# 现在改完环境相关问题后，先在这里手动跑一次验证（可只跑受影响平台），
+# 通过后再打 tag 正式发布。
+#
+# 用法：Actions → Release Check → Run workflow → 选 macos / windows / both
 on:
-  push:
-    tags: ["v*"]
-
-permissions:
-  contents: write
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: 要检查的平台
+        required: true
+        default: both
+        type: choice
+        options: [both, macos, windows]
 
 jobs:
   macos:
+    if: ${{ inputs.jobs != 'windows' }}
     runs-on: macos-14
     env:
-      # 仅构建 Intel Mac 包，需捆绑 x86-64 版 LibreOffice（runner 是 arm64）
       LIBREOFFICE_ARCH: x86-64
-      # 交叉编译（arm64→x86_64）时 libheif 的 pkg-config 交叉检查需显式放行
       PKG_CONFIG_ALLOW_CROSS: "1"
     defaults:
       run:
@@ -28,10 +40,6 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      # Cargo 构建缓存：几百个依赖 crate 只编一次，后续 run 增量恢复，
-      # 把全量编译时间从 ~30 分钟降到几分钟。libheif-sys 因 build script 依赖
-      # env（CMAKE_PREFIX_PATH/PKG_CONFIG_PATH）且无 rerun-if-env-changed，
-      # 靠下方 Build 步骤的 `cargo clean -p libheif-sys` 兜底强制重编。
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -39,9 +47,7 @@ jobs:
         run: rustup target add x86_64-apple-darwin
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
-      # arm64 runner 交叉编译 x86_64 时，libheif 链接到 /opt/homebrew 的 arm64 libjpeg，
-      # 架构不匹配导致链接失败。这里交叉编译一个 x86_64 静态 libjpeg 供其链接；
-      # CMAKE_PREFIX_PATH 会被 cmake crate 传给 libheif 的 CMake，find_package(JPEG) 优先命中它。
+      # 与 release.yml 保持一致：交叉编译 x86_64 静态 libjpeg 供 libheif 链接。
       - name: Build x86_64 libjpeg for cross-compile
         shell: bash
         run: |
@@ -58,21 +64,18 @@ jobs:
           echo "CMAKE_PREFIX_PATH=/tmp/jpeg-out" >> "$GITHUB_ENV"
       - name: Build Intel (x86_64) bundle
         run: |
-          # libheif 用 pkg-config 检测 libjpeg（pkg_check_modules(JPEG libjpeg)，非 find_package），
-          # 所以 CMAKE_PREFIX_PATH 对它无效；必须把 x86_64 libjpeg 的 pc 目录放在 PKG_CONFIG_PATH
-          # 最前面，否则 pkg-config 命中 /opt/homebrew 的 arm64 libjpeg.pc，链接阶段报
-          # "ld: symbol(s) not found for architecture x86_64"（_jpeg_* 未定义）。
           echo "PKG_CONFIG_PATH=/tmp/jpeg-out/lib/pkgconfig" >> "$GITHUB_ENV"
           test -f /tmp/jpeg-out/lib/pkgconfig/libjpeg.pc
-          # 强制 libheif-sys 重编译，确保上述 env 生效（否则复用旧 env 的缓存产物）。
           cargo clean --manifest-path ../src-tauri/Cargo.toml -p libheif-sys
           npm run tauri build -- --target x86_64-apple-darwin
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
-          generate_release_notes: true
+          name: release-check-macos-dmg
+          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
 
   windows:
+    if: ${{ inputs.jobs != 'macos' }}
     runs-on: windows-2022
     defaults:
       run:
@@ -92,17 +95,16 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
-      # libheif-sys 在 msvc 下走 vcpkg 找系统 libheif，需先安装（embedded-libheif 仅对非 msvc 生效）。
-      # 注意 triplet 必须与 vcpkg crate 的默认值一致（x64-windows-static-md），否则 find_package 找不到。
       - name: Install libheif via vcpkg
         run: |
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
           echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
           vcpkg install libheif:x64-windows-static-md
       - run: npm run tauri build
-      - uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: |
+          name: release-check-windows
+          path: |
             src-tauri/target/release/bundle/msi/*.msi
             src-tauri/target/release/bundle/nsis/*.exe
-          generate_release_notes: true
+          if-no-files-found: error
