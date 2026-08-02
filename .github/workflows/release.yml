@@ -32,6 +32,22 @@ jobs:
         run: rustup target add x86_64-apple-darwin
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
+      # arm64 runner 交叉编译 x86_64 时，libheif 链接到 /opt/homebrew 的 arm64 libjpeg，
+      # 架构不匹配导致链接失败。这里交叉编译一个 x86_64 静态 libjpeg 供其链接；
+      # CMAKE_PREFIX_PATH 会被 cmake crate 传给 libheif 的 CMake，find_package(JPEG) 优先命中它。
+      - name: Build x86_64 libjpeg for cross-compile
+        shell: bash
+        run: |
+          curl -fsSL -o /tmp/lj.tar.gz \
+            "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.0.0/libjpeg-turbo-3.0.0.tar.gz"
+          tar xzf /tmp/lj.tar.gz -C /tmp
+          cmake -S /tmp/libjpeg-turbo-3.0.0 -B /tmp/jpeg-build \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_INSTALL_PREFIX=/tmp/jpeg-out \
+            -DENABLE_SHARED=OFF -DENABLE_STATIC=ON \
+            -DWITH_TURBOJPEG=OFF
+          cmake --build /tmp/jpeg-build --target install -j 3
+          echo "CMAKE_PREFIX_PATH=/tmp/jpeg-out" >> "$GITHUB_ENV"
       - name: Build Intel (x86_64) bundle
         run: npm run tauri build -- --target x86_64-apple-darwin
       - uses: softprops/action-gh-release@v2
