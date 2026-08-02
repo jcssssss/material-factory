@@ -78,11 +78,13 @@ jobs:
           toolchain: stable
       - run: npm ci
       - run: bash ../scripts/prepare-libreoffice.sh
-      # libheif-sys 在 msvc 下走 vcpkg 找系统 libheif，需先安装（embedded-libheif 仅对非 msvc 生效）
+      # libheif-sys 在 msvc 下走 vcpkg 找系统 libheif，需先安装（embedded-libheif 仅对非 msvc 生效）。
+      # 注意 triplet 必须与 vcpkg crate 的默认值一致（x64-windows-static-md），否则 find_package 找不到。
       - name: Install libheif via vcpkg
         run: |
           echo "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
-          vcpkg install libheif:x64-windows
+          echo "VCPKGRS_TRIPLET=x64-windows-static-md" >> $env:GITHUB_ENV
+          vcpkg install libheif:x64-windows-static-md
       - run: npm run tauri build
       - uses: softprops/action-gh-release@v2
         with:
