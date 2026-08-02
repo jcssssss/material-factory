@@ -51,9 +51,13 @@ jobs:
           echo "CMAKE_PREFIX_PATH=/tmp/jpeg-out" >> "$GITHUB_ENV"
       - name: Build Intel (x86_64) bundle
         run: |
-          # 强制 libheif-sys 用当前 env 重新编译：setup-rust-toolchain 的 SWC 缓存会复用上次失败 run
-          # 的产物（无 CMAKE_PREFIX_PATH，链接 /opt/homebrew 的 arm64 libjpeg），clean 后重跑 build script
-          # 才会按 CMAKE_PREFIX_PATH 找到 x86_64 libjpeg。
+          # libheif 用 pkg-config 检测 libjpeg（pkg_check_modules(JPEG libjpeg)，非 find_package），
+          # 所以 CMAKE_PREFIX_PATH 对它无效；必须把 x86_64 libjpeg 的 pc 目录放在 PKG_CONFIG_PATH
+          # 最前面，否则 pkg-config 命中 /opt/homebrew 的 arm64 libjpeg.pc，链接阶段报
+          # "ld: symbol(s) not found for architecture x86_64"（_jpeg_* 未定义）。
+          echo "PKG_CONFIG_PATH=/tmp/jpeg-out/lib/pkgconfig" >> "$GITHUB_ENV"
+          test -f /tmp/jpeg-out/lib/pkgconfig/libjpeg.pc
+          # 强制 libheif-sys 重编译，确保上述 env 生效（否则复用旧 env 的缓存产物）。
           cargo clean --manifest-path ../src-tauri/Cargo.toml -p libheif-sys
           npm run tauri build -- --target x86_64-apple-darwin
       - uses: softprops/action-gh-release@v2
