@@ -1,6 +1,6 @@
 [package]
 name = "xhs-pic"
-version = "0.1.0"
+version = "0.1.3"
 description = "小红书素材工厂 - 桌面批量 PDF 转小红书素材"
 authors = ["xhs-pic"]
 edition = "2021"
