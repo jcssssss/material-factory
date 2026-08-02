@@ -50,7 +50,12 @@ jobs:
           cmake --build /tmp/jpeg-build --target install -j 3
           echo "CMAKE_PREFIX_PATH=/tmp/jpeg-out" >> "$GITHUB_ENV"
       - name: Build Intel (x86_64) bundle
-        run: npm run tauri build -- --target x86_64-apple-darwin
+        run: |
+          # 强制 libheif-sys 用当前 env 重新编译：setup-rust-toolchain 的 SWC 缓存会复用上次失败 run
+          # 的产物（无 CMAKE_PREFIX_PATH，链接 /opt/homebrew 的 arm64 libjpeg），clean 后重跑 build script
+          # 才会按 CMAKE_PREFIX_PATH 找到 x86_64 libjpeg。
+          cargo clean --manifest-path ../src-tauri/Cargo.toml -p libheif-sys
+          npm run tauri build -- --target x86_64-apple-darwin
       - uses: softprops/action-gh-release@v2
         with:
           files: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
