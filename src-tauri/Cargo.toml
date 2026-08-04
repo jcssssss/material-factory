@@ -24,6 +24,7 @@ rayon = "1"
 num_cpus = "1"
 lopdf = "0.34"
 libheif-rs = { version = "2.3.0", features = ["embedded-libheif"] }
+ureq = { version = "2", features = ["json"] }
 
 [profile.dev]
 # 开发模式：多 codegen units 加速编译，牺牲少量运行时性能

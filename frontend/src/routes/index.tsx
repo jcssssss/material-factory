@@ -5,6 +5,7 @@ import LogViewerPage from "../pages/LogViewerPage";
 import BackgroundTemplatePage from "../pages/BackgroundTemplatePage";
 import CalibratePage from "../pages/CalibratePage";
 import DocumentCleanerPage from "../document-cleaner/pages/DocumentCleanerPage";
+import AnswerGeneratorPage from "../answer-generator/pages/AnswerGeneratorPage";
 
 export type RouteDef = {
   path: string;
@@ -15,6 +16,7 @@ export type RouteDef = {
 
 export const routes: RouteDef[] = [
   { path: "/", label: "工作台", element: <WorkbenchPage /> },
+  { path: "/answer-generator", label: "答案生成器", element: <AnswerGeneratorPage /> },
   { path: "/history", label: "历史任务", element: <HistoryPage /> },
   { path: "/logs", label: "日志", element: <LogViewerPage /> },
   { path: "/backgrounds", label: "背景模板", element: <BackgroundTemplatePage /> },

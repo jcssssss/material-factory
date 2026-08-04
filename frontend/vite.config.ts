@@ -15,6 +15,7 @@ export default defineConfig({
     react(),
     // pdf.js 渲染未嵌入的中文 CID 字体需要 CMap/标准字体资源：
     // 构建时把 pdfjs-dist 自带资源复制进产物，运行时用相对路径加载（file:// 兼容）。
+    // tesseract.js 本地 OCR（扫描版试卷转文字）：worker 脚本 + WASM 核心 + 中英文训练数据。
     viteStaticCopy({
       targets: [
         {
@@ -24,6 +25,23 @@ export default defineConfig({
         {
           src: "node_modules/pdfjs-dist/standard_fonts/*",
           dest: "pdfjs/standard_fonts",
+        },
+        {
+          src: "node_modules/tesseract.js/dist/worker.min.js",
+          dest: "tesseract",
+        },
+        {
+          // 所有核心变体（含 SIMD）一并复制，worker 按设备能力自动选择
+          src: "node_modules/tesseract.js-core/tesseract-core*.wasm*",
+          dest: "tesseract",
+        },
+        {
+          src: "node_modules/@tesseract.js-data/chi_sim/4.0.0/chi_sim.traineddata.gz",
+          dest: "tesseract/lang",
+        },
+        {
+          src: "node_modules/@tesseract.js-data/eng/4.0.0/eng.traineddata.gz",
+          dest: "tesseract/lang",
         },
       ],
     }),

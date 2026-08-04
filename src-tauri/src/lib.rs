@@ -17,6 +17,7 @@
 // 全部命令使用 std::fs 实现，错误通过 Result<T, String> 返回给前端，
 // 由 taskRunner 在页级 / PDF 级 / 任务级三层失败隔离中处理。
 
+mod answer_generator;
 mod background;
 mod db;
 mod warp;
@@ -111,6 +112,12 @@ pub fn run() {
             python_bridge::python_detect,
             python_bridge::python_clean,
             python_bridge::python_validate,
+            answer_generator::generate_answers,
+            answer_generator::cancel_answer_generation,
+            answer_generator::test_api_connection,
+            answer_generator::list_available_models,
+            answer_generator::convert_answer_html_to_pdf,
+            answer_generator::open_folder,
             copy_file,
         ])
         .run(tauri::generate_context!())
@@ -363,7 +370,7 @@ fn soffice_usable(path: &Path) -> bool {
     matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Ok(o)) if o.status.success())
 }
 
-fn find_libreoffice(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub(crate) fn find_libreoffice(app: &tauri::AppHandle) -> Option<PathBuf> {
     // Linux 无捆绑资源目录，AppHandle 仅供 macos/windows 的资源目录查找使用。
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = app;
@@ -955,7 +962,7 @@ fn urlencode_path(p: &Path) -> String {
 // 用单个 Word 文件启动一次 soffice，超时内正常退出返回 true。
 // 是否生成 PDF 由调用方检查缓存目录（输出名可能与 stem 不一致）。
 // 使用独立 profile（主批崩溃后其 profile 可能残留锁/损坏组件，复用会启动失败）。
-fn run_soffice_single(
+pub(crate) fn run_soffice_single(
     soffice: &Path,
     word_path: &str,
     cache_dir: &Path,

@@ -15,6 +15,7 @@ import {
   ScrollText,
   Image,
   Droplets,
+  ClipboardPenLine,
   ChevronLeft,
   ChevronRight,
 } from "lucide-react";
@@ -30,6 +31,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ICONS: Record<string, ReactNode> = {
   "/": <LayoutDashboard className="h-5 w-5" />,
+  "/answer-generator": <ClipboardPenLine className="h-5 w-5" />,
   "/history": <History className="h-5 w-5" />,
   "/logs": <ScrollText className="h-5 w-5" />,
   "/backgrounds": <Image className="h-5 w-5" />,
